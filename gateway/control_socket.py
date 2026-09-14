@@ -1,5 +1,5 @@
 """Gateway control socket — the gateway-owned local coordination surface: a local-only socket answering
-versioned JSON verbs (``identify``, ``status``). A connectable socket with a well-formed ``identify``
+versioned JSON verbs (``identify``, ``status``, ``reload-mcp``). A connectable socket with a well-formed ``identify``
 answer IS liveness — no PID-reuse heuristics. Never a TCP port: filesystem/pipe ACLs are the auth
 boundary. POSIX: ``$HERMES_HOME/gateway.sock`` (or a temp-dir socket + ``gateway.sock.path`` pointer
 file when the home path exceeds ``sun_path``); Windows: named pipe ``\\\\.\\pipe\\hermes-gateway-<hash>``.
@@ -368,3 +368,11 @@ def migrate_gateway_profile_identity(home: Path, old_name: str, new_name: str, *
     and a restart reconciles the in-memory copy."""
     return query_gateway_control(home, "migrate-profile-identity",
                                  params={"old": old_name, "new": new_name}, timeout=timeout)
+
+def reload_gateway_mcp(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
+    """Ask a running gateway to reload its MCP servers without an inbound chat message.
+
+    The acknowledgement only confirms that the gateway accepted the asynchronous reload; callers
+    should inspect gateway logs for the final reload result.
+    """
+    return query_gateway_control(home, "reload-mcp", timeout=timeout)
