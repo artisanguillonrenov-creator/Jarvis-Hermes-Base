@@ -374,6 +374,31 @@ class TestMaybeAutoTitle:
         assert db.get_session_title_source("sess-1") == "llm"
         mock_auto.assert_not_called()
 
+    def test_kanban_worker_uses_dispatcher_title_without_background_llm(self, tmp_path, monkeypatch):
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="sess-1", source="kanban")
+        monkeypatch.setenv("HERMES_KANBAN_TASK_TITLE", "Fix flaky worker startup")
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "sess-1", "work kanban task t_b21733fb", [])
+
+        assert db.get_session_title("sess-1") == "Fix flaky worker startup"
+        assert db.get_session_title_source("sess-1") == "llm"
+        mock_auto.assert_not_called()
+
+    def test_kanban_dispatcher_title_keeps_manual_title_precedence(self, tmp_path, monkeypatch):
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="sess-1", source="kanban")
+        db.set_session_title("sess-1", "Operator-selected title")
+        monkeypatch.setenv("HERMES_KANBAN_TASK_TITLE", "Fix flaky worker startup")
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "sess-1", "work kanban task t_b21733fb", [])
+
+        assert db.get_session_title("sess-1") == "Operator-selected title"
+        assert db.get_session_title_source("sess-1") == "user"
+        mock_auto.assert_not_called()
+
     def test_kanban_worker_with_an_overlong_card_title_is_still_named(self, tmp_path, monkeypatch):
         """Cards have no length cap; the store rejects past MAX_TITLE_LENGTH, so the card title is trimmed, not dropped."""
         from hermes_cli import kanban_db, kanban_db_connect
