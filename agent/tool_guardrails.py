@@ -370,6 +370,24 @@ class ToolCallGuardrailController:
         self, tool_name: str, args: Mapping[str, Any] | None, result: str | None,
         *, failed: bool | None = None,
     ) -> ToolGuardrailDecision:
+        decision = self._after_call(tool_name, args, result, failed=failed)
+        if decision.action != "none":
+            # Warn/halt decisions were previously invisible in logs, which let a
+            # week-long 90-iteration failure loop look like "guardrails never fired".
+            logger.warning(
+                "Tool guardrail %s: %s (tool=%s, count=%s)",
+                decision.action, decision.code, decision.tool_name, decision.count,
+            )
+        return decision
+
+    def _after_call(
+        self,
+        tool_name: str,
+        args: Mapping[str, Any] | None,
+        result: str | None,
+        *,
+        failed: bool | None = None,
+    ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
         if failed is None:
