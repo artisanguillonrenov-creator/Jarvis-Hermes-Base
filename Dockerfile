@@ -196,10 +196,25 @@ COPY apps/shared/ apps/shared/
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
 
+# Two Chromium builds, deliberately:
+#   --only-shell   chrome-headless-shell, what the browser tool has always
+#                  driven headlessly. Smaller, no window code paths.
+#   (headed)       the full chromium build. chrome-headless-shell CANNOT open
+#                  a window, so Bot Screen's dock Browser icon and any
+#                  human-visible browser on the bot's X display need this one.
+#                  Both must be the SAME browser family sharing one
+#                  --user-data-dir, or a human who takes over logs into a jar
+#                  the bot never sees.
+# --with-deps is only needed once; the second install reuses the same system
+# libraries. Keep both in one RUN so a retry re-runs the pair together.
 RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
     for i in 1 2 3; do \
         npx playwright install --with-deps chromium --only-shell && break || \
-        { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+        { [ "$i" = 3 ] && exit 1; echo "playwright headless-shell install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+    done && \
+    for i in 1 2 3; do \
+        npx playwright install --with-deps chromium && break || \
+        { [ "$i" = 3 ] && exit 1; echo "playwright chromium install failed (attempt $i); retrying in 10s"; sleep 10; }; \
     done && \
     npm cache clean --force
 
@@ -279,6 +294,43 @@ COPY ui-tui/ ui-tui/
 COPY apps/shared/ apps/shared/
 RUN cd web && npm run build && \
     cd ../ui-tui && npm run build
+
+# ---------- Bot Screen desktop packages ----------
+# Bot Screen (per-profile Xfce desktop streamed to Hermes Desktop) needs an X
+# server and a window manager on the gateway host. On a self-hosted box the
+# operator installs them; the pane's "Install on host" button runs the same
+# apt/dnf/pacman command over sudo. NEITHER path exists in this image:
+# supervised services drop to the unprivileged `hermes` user
+# (`s6-setuidgid hermes`, UID 10000 by default), no `sudo` binary is
+# installed, and /opt/hermes is sealed read-only. A runtime install would also
+# land in the ephemeral container layer rather than the /opt/data volume, so it
+# would be re-downloaded on every container recreate. Baking the packages here
+# is therefore the ONLY way hosted/immutable deployments can offer the feature.
+#
+# Xvnc and the Xfce components all run fine unprivileged: Xvnc is a userspace X
+# server (no DRM/input device access, unlike Xorg on real hardware), so nothing
+# below needs root at runtime. Only this build step does.
+#
+# The list mirrors PACKAGES["apt"] in tools/bot_desktop/runtime.py, which is
+# what the CLI and the install card would run by hand;
+# tests/tools/test_dockerfile_bot_desktop_packages.py fails the build if the
+# two drift apart. Deliberately NOT the `xfce4` metapackage: a headless desktop
+# has no use for a screensaver, a power manager or a polkit agent.
+#
+# Placed after the npm/Playwright/uv layers so editing this list rebuilds one
+# apt layer instead of invalidating ~5 minutes of dependency work below it.
+RUN apt-get -o Acquire::Retries=3 update && \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+    tigervnc-standalone-server xfce4-panel xfwm4 xfdesktop4 xfce4-settings \
+    xfce4-terminal dbus-x11 x11-xserver-utils x11-utils x11-xkb-utils xauth \
+    fonts-dejavu-core && \
+    rm -rf /var/lib/apt/lists/*
+
+# X servers put their socket in /tmp/.X11-unix and their lock in /tmp/.X<n>-lock.
+# Debian's /tmp is already 1777 so the unprivileged runtime user can create the
+# directory itself, but pre-creating it with the sticky bit keeps ownership
+# deterministic when HERMES_UID is remapped between boots.
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
@@ -404,6 +456,16 @@ ENV HERMES_DISABLE_LAZY_INSTALLS=1
 # on the /opt/data volume, so it persists across container recreates / image
 # updates (an ABI stamp invalidates it if a rebuild bumps the interpreter).
 ENV HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
+
+# Xfce, dbus-run-session and Bot Screen's display-allocation lock all want an
+# XDG_RUNTIME_DIR. Nothing sets one in a container (there is no logind to
+# create /run/user/<uid>), and the fallback is $HOME/.cache, which here is the
+# /opt/data volume: commonly bind-mounted and sometimes SHARED with a host-side
+# Hermes install, so two instances would contend for one display-alloc lock and
+# collide on dbus sockets. Point it at a container-scoped path under /tmp
+# instead: per-boot, per-container, and matching the spec's "cleared on reboot"
+# semantics. Seeded 0700 by docker/stage2-hook.sh.
+ENV XDG_RUNTIME_DIR=/tmp/hermes-runtime
 
 # `docker exec` privilege-drop shim. When operators run
 # `docker exec <c> hermes ...` they default to root, and any file the

@@ -2281,6 +2281,11 @@ DEFAULT_CONFIG = {
         # host. Off by default so installing TigerVNC for other reasons never yields a screen nobody asked
         # for; Hermes Desktop's Screen pane offers Start and this toggle.
         "auto_start": False,
+        # Refuse to start below this much free memory (MB). Measured in the official image, a screen with one
+        # browser page runs past 1 GB, and the kernel OOM killer picks its victim by score, so on a small
+        # instance it takes out the dashboard or the gateway rather than the desktop. 0 disables the check.
+        # HERMES_BOT_DESKTOP_MIN_FREE_MEMORY_MB overrides it where templating a config file is awkward.
+        "min_free_memory_mb": 1536,
     },
     "computer_use": {
         # cua-driver's upstream PostHog telemetry defaults ON; Hermes sets

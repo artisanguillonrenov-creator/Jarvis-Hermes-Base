@@ -92,8 +92,12 @@ def package_manager() -> Optional[str]:
 
 def install_command() -> Optional[str]:
     """The distro command that installs the Bot Desktop packages, as the human would type it on THIS host:
-    prefixed with ``sudo`` unless Hermes already runs as root (the official Docker image is uid 0 with no
-    sudo binary), so it is both what the pane shows and what :mod:`tools.bot_desktop.install` runs."""
+    prefixed with ``sudo`` unless Hermes already runs as root, so it is both what the pane shows and what
+    :mod:`tools.bot_desktop.install` runs. ``None`` when no package manager is present.
+
+    Not a promise that it can run here: see :func:`installable`. The published Docker image supervises
+    every service under ``s6-setuidgid hermes`` (UID 10000 by default) and ships no ``sudo`` binary, so an
+    install on a hosted instance is impossible no matter what this returns."""
     pm = package_manager()
     if pm is None:
         return None
@@ -108,6 +112,19 @@ def install_command() -> Optional[str]:
 
 def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def installable() -> bool:
+    """Whether :func:`install_command` could actually succeed on this host.
+
+    False on an unprivileged process with no ``sudo`` to reach for, which is exactly the published Docker
+    image: services drop to the ``hermes`` user and no ``sudo`` binary is installed. The packages can only
+    arrive in the image there, so the pane must say that instead of offering a button that cannot work or
+    printing a sudo line the user has no way to run.
+    """
+    if package_manager() is None:
+        return False
+    return is_root() or shutil.which("sudo") is not None
 
 
 @dataclass
@@ -387,6 +404,117 @@ def _profile_name() -> str:
         return "default"
 
 
+# Measured in the official image (cgroup memory.current): gateway idle 304 MiB; Xvnc + Xfce with nothing
+# open 520 MiB (+216); one Chromium page 1073 MiB (+553, peak 1115). The browser dominates and that is the
+# point of the feature, so the desktop is not something to squeeze under a budget. What we can do is refuse
+# to start when there is not enough headroom, because the kernel OOM killer picks a victim by score, not by
+# who caused the pressure: on a small instance it takes out the dashboard or the gateway and the desktop
+# survives, which surfaces as an unrelated outage nobody traces back to here.
+_MIN_FREE_MEMORY_MB = 1536   # refuse below this much headroom
+_WARN_FREE_MEMORY_MB = 2048  # start, but say it is tight
+_CGROUP_ROOT = Path("/sys/fs/cgroup")  # tests point it at a scratch dir
+_MEMINFO = Path("/proc/meminfo")       # same
+
+
+def _read_int(path: Path) -> Optional[int]:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+
+
+def _cgroup_free_mb() -> Optional[int]:
+    """Headroom against the cgroup's own limit, or None when unlimited/unreadable.
+
+    The limit is what the OOM killer enforces, and ``/proc/meminfo`` does not report it: on a container host
+    meminfo describes the NODE, so a headroom check there is meaningless (it happens to be right on a Fly
+    machine only because those are microVMs). Cgroup v2 layout, which is what current Docker/containerd give.
+
+    ``memory.current`` counts reclaimable page cache, which is why a container reads several hundred MB above
+    idle right after a desktop stops even though every process is gone. Charging that against the limit would
+    make the check tighten the longer an instance stays up and refuse starts that would have been fine, so we
+    subtract ``inactive_file`` (the working-set convention kubelet uses).
+    """
+    root = _CGROUP_ROOT
+    try:
+        limit_raw = (root / "memory.max").read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if limit_raw == "max":  # no limit set: the host's own free memory is the real answer
+        return None
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        return None
+    current = _read_int(root / "memory.current")
+    if current is None:
+        return None
+    inactive_file = 0
+    try:
+        for line in (root / "memory.stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("inactive_file "):
+                inactive_file = int(line.split()[1])
+                break
+    except Exception:
+        pass
+    working_set = max(current - inactive_file, 0)
+    return max(limit - working_set, 0) // (1024 * 1024)
+
+
+def _meminfo_free_mb() -> Optional[int]:
+    """MemAvailable, the fallback for an unlimited cgroup or cgroup v1. None when unreadable."""
+    try:
+        for line in _MEMINFO.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except Exception:
+        return None
+    return None
+
+
+def free_memory_mb() -> Optional[int]:
+    """Memory a desktop could actually use here. None when nothing on this host can tell us."""
+    free = _cgroup_free_mb()
+    return free if free is not None else _meminfo_free_mb()
+
+
+def _min_free_memory_mb() -> int:
+    """``bot_desktop.min_free_memory_mb``, overridable by env so a hosted deployment can set it per instance
+    without templating a config file. 0 or negative disables the check."""
+    override = os.environ.get("HERMES_BOT_DESKTOP_MIN_FREE_MEMORY_MB", "").strip()
+    if not override:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly().get("bot_desktop") or {}
+        configured = cfg.get("min_free_memory_mb")
+        if configured is None:
+            return _MIN_FREE_MEMORY_MB
+        override = str(configured).strip()
+    try:
+        return int(override)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-numeric bot_desktop.min_free_memory_mb=%r", override)
+        return _MIN_FREE_MEMORY_MB
+
+
+def _refuse_below_memory_floor() -> None:
+    """Raise when this host has too little headroom for a desktop plus the browser that is the point of it."""
+    floor = _min_free_memory_mb()
+    if floor <= 0:
+        return
+    free = free_memory_mb()
+    if free is None:  # nothing readable: do not stand in the way of a host we cannot measure
+        return
+    if free < floor:
+        raise RuntimeError(
+            f"Bot Desktop needs about {floor} MB of free memory to start and this host has {free} MB. "
+            "A desktop plus the bot's browser runs past 1 GB, so starting here would likely get another "
+            "process OOM-killed instead. Give the instance more memory, or lower "
+            "bot_desktop.min_free_memory_mb if you accept the risk.")
+    if free < _WARN_FREE_MEMORY_MB:
+        logger.warning(
+            "Bot Desktop starting with %d MB free; a browser with a few pages open can use most of that.", free)
+
+
 def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
     """Start this profile's desktop (idempotent). Blocks until the launcher publishes its env file or
     ``wait_seconds`` pass; raises ``RuntimeError`` naming the blocker.
@@ -400,8 +528,14 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
         raise RuntimeError("Bot Desktop runs on Linux gateway hosts only")
     missing = missing_binaries()
     if missing:
+        if not installable():
+            raise RuntimeError(
+                f"Bot Desktop needs {', '.join(missing)} on the gateway host, and this host cannot install "
+                "them: the process is unprivileged and there is no sudo. On the published Docker image the "
+                "packages have to be baked in, so this needs a newer image rather than an install.")
         hint = install_command() or "install TigerVNC (Xvnc) and the Xfce core components"
         raise RuntimeError(f"Bot Desktop needs {', '.join(missing)} on the gateway host. Install: {hint}")
+    _refuse_below_memory_floor()
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     os.chmod(sd, 0o700)

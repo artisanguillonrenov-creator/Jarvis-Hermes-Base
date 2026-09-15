@@ -395,6 +395,19 @@ as_hermes mkdir -p \
     "$HERMES_HOME/platforms/pairing" \
     "$HERMES_HOME/lazy-packages"
 
+# --- XDG_RUNTIME_DIR ---
+# Xfce, dbus-run-session and Bot Screen's display-allocation lock expect one.
+# Containers have no logind to create /run/user/<uid>, so the Dockerfile points
+# XDG_RUNTIME_DIR at a container-scoped path under /tmp and we create it here,
+# owned by hermes and 0700 as the spec requires (dbus refuses a world-readable
+# runtime dir). Deliberately NOT under $HERMES_HOME: that volume is commonly
+# bind-mounted and sometimes shared with a host-side install.
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    as_hermes mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || \
+        echo "[stage2] Warning: could not create XDG_RUNTIME_DIR $XDG_RUNTIME_DIR (continuing)"
+    chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+fi
+
 # --- Install-method stamp ---
 # The 'docker' stamp is baked into the immutable install tree at
 # /opt/hermes/.install_method (see Dockerfile), NOT written here into
@@ -647,10 +660,12 @@ if [ -d "$INSTALL_DIR/skills" ]; then
 fi
 
 # --- Discover agent-browser's Chromium binary ---
-# The image's Dockerfile runs `npx playwright install chromium`, which
-# populates ``$PLAYWRIGHT_BROWSERS_PATH`` (=/opt/hermes/.playwright) with
-# a ``chromium_headless_shell-<build>/chrome-headless-shell-linux64/``
-# directory. agent-browser (the runtime CLI Hermes spawns for the
+# The image's Dockerfile runs `npx playwright install chromium` twice (the
+# headless shell and the full headed build), which populates
+# ``$PLAYWRIGHT_BROWSERS_PATH`` (=/opt/hermes/.playwright) with a
+# ``chromium_headless_shell-<build>/chrome-headless-shell-linux64/`` directory
+# and a ``chromium-<build>/chrome-linux64/`` one. agent-browser (the runtime
+# CLI Hermes spawns for the
 # browser tool) doesn't recognise this layout in its own cache scan and
 # fails with "Auto-launch failed: Chrome not found" — even though the
 # binary is right there (#15697).
@@ -675,11 +690,21 @@ fi
 if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ] && \
         [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && \
         [ -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+    # Ordered, not a single find: the image now ships BOTH the full chromium
+    # build and chrome-headless-shell (Bot Screen needs a browser that can open
+    # a window on the bot's X display; the headless shell cannot). One find with
+    # alternated -name predicates returns them in directory order, so it would
+    # export whichever Playwright happened to unpack first. Prefer the headed
+    # build and fall back to the shell, so an image built without it (custom
+    # builds that strip the headed chromium) keeps today's behaviour.
     browser_bin=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -executable \
-        \( -name 'chrome' -o -name 'chromium' \
-           -o -name 'chrome-headless-shell' -o -name 'headless_shell' \
-           -o -name 'chromium-browser' \) \
+        \( -name 'chrome' -o -name 'chromium' -o -name 'chromium-browser' \) \
         2>/dev/null | head -n 1)
+    if [ -z "$browser_bin" ]; then
+        browser_bin=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -executable \
+            \( -name 'chrome-headless-shell' -o -name 'headless_shell' \) \
+            2>/dev/null | head -n 1)
+    fi
     if [ -n "$browser_bin" ]; then
         echo "[stage2] Found agent-browser Chromium binary: $browser_bin"
         # Write to s6's container_environment so with-contenv picks it
