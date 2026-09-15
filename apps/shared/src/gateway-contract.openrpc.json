@@ -17143,7 +17143,7 @@
       },
       "CronJobRow": {
         "additionalProperties": false,
-        "description": "Closed row from ``tools/cronjob_job_args.py:346-394``.",
+        "description": "Closed row from ``tools/cronjob_job_args.py::_format_job``; the ``_FORMAT_JOB_OPTIONAL_KEYS`` /\ncontinuity / context_from / attach_to_session keys are only present when set.",
         "properties": {
           "job_id": {
             "title": "Job Id",
@@ -17360,6 +17360,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Script"
           },
           "reasoning_effort": {
@@ -17371,6 +17372,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Reasoning Effort"
           },
           "monitor_script": {
@@ -17382,6 +17384,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Monitor Script"
           },
           "monitor_url": {
@@ -17393,6 +17396,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Monitor Url"
           },
           "monitor_state": {
@@ -17403,7 +17407,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "default": null
           },
           "no_agent": {
             "anyOf": [
@@ -17414,6 +17419,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "No Agent"
           },
           "enabled_toolsets": {
@@ -17428,6 +17434,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Enabled Toolsets"
           },
           "workdir": {
@@ -17439,6 +17446,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Workdir"
           },
           "continuity": {
@@ -17450,6 +17458,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Continuity"
           },
           "context_from": {
@@ -17464,6 +17473,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Context From"
           },
           "attach_to_session": {
@@ -17475,6 +17485,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Attach To Session"
           }
         },
@@ -17500,18 +17511,7 @@
           "enabled",
           "state",
           "paused_at",
-          "paused_reason",
-          "script",
-          "reasoning_effort",
-          "monitor_script",
-          "monitor_url",
-          "monitor_state",
-          "no_agent",
-          "enabled_toolsets",
-          "workdir",
-          "continuity",
-          "context_from",
-          "attach_to_session"
+          "paused_reason"
         ],
         "title": "CronJobRow",
         "type": "object"
@@ -17569,7 +17569,7 @@
       },
       "CronManageResult": {
         "additionalProperties": false,
-        "description": "``methods_tools.py:1059-1083`` adapts the listed ``cronjob`` action outcomes.",
+        "description": "``methods_tools.py:1059-1083`` adapts the listed ``cronjob`` action outcomes;\neach action fills its own subset, so every optional key defaults.",
         "properties": {
           "success": {
             "title": "Success",
@@ -17584,6 +17584,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Error"
           },
           "count": {
@@ -17595,6 +17596,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Count"
           },
           "jobs": {
@@ -17609,6 +17611,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Jobs"
           },
           "scoped": {
@@ -17620,6 +17623,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Scoped"
           },
           "gateway_running": {
@@ -17631,6 +17635,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Gateway Running"
           },
           "warning": {
@@ -17642,6 +17647,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Warning"
           },
           "job_id": {
@@ -17653,6 +17659,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Job Id"
           },
           "name": {
@@ -17664,6 +17671,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Name"
           },
           "skill": {
@@ -17675,6 +17683,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Skill"
           },
           "skills": {
@@ -17689,6 +17698,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Skills"
           },
           "schedule": {
@@ -17700,6 +17710,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Schedule"
           },
           "repeat": {
@@ -17714,6 +17725,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Repeat"
           },
           "deliver": {
@@ -17725,6 +17737,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Deliver"
           },
           "next_run_at": {
@@ -17736,6 +17749,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Next Run At"
           },
           "job": {
@@ -17746,7 +17760,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "default": null
           },
           "message": {
             "anyOf": [
@@ -17757,6 +17772,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Message"
           },
           "guidance": {
@@ -17771,6 +17787,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Guidance"
           },
           "removed_job": {
@@ -17781,29 +17798,12 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "default": null
           }
         },
         "required": [
-          "success",
-          "error",
-          "count",
-          "jobs",
-          "scoped",
-          "gateway_running",
-          "warning",
-          "job_id",
-          "name",
-          "skill",
-          "skills",
-          "schedule",
-          "repeat",
-          "deliver",
-          "next_run_at",
-          "job",
-          "message",
-          "guidance",
-          "removed_job"
+          "success"
         ],
         "type": "object"
       },
