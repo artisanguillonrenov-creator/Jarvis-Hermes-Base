@@ -2737,6 +2737,17 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             cut = i
         return cut, accumulated
 
+    def _tail_budget_tokens(self, messages: List[Dict[str, Any]], cut_idx: int) -> int:
+        """Count a suffix with the same thinking policy used by the tail walk."""
+        newest_asst_idx = _last_assistant_index(messages)
+        charge_all_thinking = self._stale_thinking_on_wire()
+        return sum(
+            _estimate_msg_budget_tokens(
+                messages[i], charge_all_thinking or i == newest_asst_idx,
+            )
+            for i in range(max(0, cut_idx), len(messages))
+        )
+
     def _prune_boundary(
         self, result: List[Dict[str, Any]], protect_tail_count: int, protect_tail_tokens: int | None,
     ) -> int:
@@ -4051,8 +4062,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Pull a compress-end boundary back so a tool group is not split (orphaned tail results would be dropped)."""
         if idx <= 0 or idx >= len(messages):
             return idx
-        check = next((i for i in range(idx - 1, -1, -1) if messages[i].get("role") != "tool"), -1)
-        # Landed on the parent assistant: move before it so the group is summarised together.
+        previous = messages[idx - 1]
+        # A cut immediately after the parent would leave its results in the tail, so keep the group together.
+        if previous.get("role") == "assistant" and previous.get("tool_calls"):
+            return idx - 1
+        # A cut before a tool result is inside its group. Walk over only the consecutive results; a cut after
+        # the final result is already clean and must not pull an extra completed group into the tail.
+        if messages[idx].get("role") != "tool":
+            return idx
+        check = idx - 1
+        while check >= 0 and messages[check].get("role") == "tool":
+            check -= 1
         if check >= 0 and messages[check].get("role") == "assistant" and messages[check].get("tool_calls"):
             return check
         return idx
@@ -4344,8 +4364,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         self, messages: List[Dict[str, Any]], head_end: int, token_budget: int | None = None,
     ) -> int:
         """Walk backward accumulating tokens until the budget; return the tail start index.
-        May exceed the budget by up to 1.5x to avoid cutting inside an oversized message; never splits a
-        tool group; keeps the last user message in the tail."""
+        Optional rows stay within the 1.5x soft ceiling. Active turns and the latest visible assistant reply
+        stay anchored; a bulky completed user turn can move into the summary when that is the only way to
+        avoid an unbounded suffix. Tool groups remain atomic."""
         if token_budget is None:
             token_budget = self.tail_token_budget
         n = len(messages)
@@ -4358,27 +4379,65 @@ Write only the summary body. Do not include any preamble or prefix."""
         min_tail = min(min_tail_floor, compressible_tail_cap, available_tail) if available_tail > 1 else 0
         soft_ceiling = int(token_budget * 1.5)
         cut_idx, accumulated = self._walk_tail_budget(messages, head_end, soft_ceiling, min_tail, cut_at_break=False)
+        fallback_cut = n - min_tail
+        # The count floor is only a minimum. Check the whole floor, not just each row: several
+        # medium-sized recent messages can exceed the soft ceiling together. Keep the tiny-budget
+        # behavior for metadata-sized rows, where the fixed per-message overhead is larger than
+        # the configured budget and the count floor is still the useful invariant.
+        floor_start = max(0, fallback_cut)
+        floor_count = max(1, len(messages) - floor_start)
+        floor_tokens = self._tail_budget_tokens(messages, floor_start)
+        floor_exceeds_ceiling = (
+            floor_tokens > soft_ceiling
+            and floor_tokens > 256 * floor_count
+        )
+        if floor_exceeds_ceiling:
+            cut_idx, accumulated = self._walk_tail_budget(
+                messages, head_end, soft_ceiling, 0, cut_at_break=False,
+            )
         # Whole transcript fits soft_ceiling: re-cut with the raw budget so a worthwhile middle
         # exists (else #40803 loop).
         if cut_idx <= head_end and 0 < accumulated <= soft_ceiling:
             cut_idx, _ = self._walk_tail_budget(messages, head_end, token_budget, min_tail, cut_at_break=True)
 
-        fallback_cut = n - min_tail
-        cut_idx = min(cut_idx, fallback_cut)
+        if not floor_exceeds_ceiling:
+            cut_idx = min(cut_idx, fallback_cut)
         # Small conversations: force a cut after the head so compression still removes something.
         if cut_idx <= head_end:
-            cut_idx = max(fallback_cut, head_end + 1)
+            cut_idx = max(cut_idx if floor_exceeds_ceiling else fallback_cut, head_end + 1)
         cut_idx = self._align_boundary_backward(messages, cut_idx)
-        # Latest user message must stay in the tail (active task). Latest assistant reply must stay too;
-        # anchors only walk backward, so chaining is monotonic.
-        # Ensure the most recent user message is always in the tail so the active task is never lost to
-        # compression (fixes #10896).
+        # Keep the latest assistant reply in the tail. The latest user normally stays too, but a very large
+        # anchored tail can move that user into the summary; the compaction handoff restores it if unfinished.
+        base_cut = cut_idx
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
+        user_anchored_cut = cut_idx
         cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
+
+        # When the user anchor is the only thing making a completed tail unbounded, keep the assistant anchor
+        # and let the summary carry the finished turn. Active asks keep the old anchor behavior.
+        _min_tail_users = getattr(self, "min_tail_user_messages", 1)
+        _single_user_anchor = not (
+            isinstance(_min_tail_users, int)
+            and not isinstance(_min_tail_users, bool)
+            and _min_tail_users > 1
+        )
+        if (
+            _single_user_anchor
+            and user_anchored_cut != base_cut
+            and self._find_inflight_user_task(messages) is None
+        ):
+            # ``base_cut`` is before the user anchor, so this candidate keeps the latest assistant without
+            # pulling a completed user turn and its old tool history back into the protected suffix.
+            assistant_only_cut = self._ensure_last_assistant_message_in_tail(messages, base_cut, head_end)
+            if (
+                self._tail_budget_tokens(messages, cut_idx) > soft_ceiling
+                and assistant_only_cut > head_end
+                and self._tail_budget_tokens(messages, assistant_only_cut) <= soft_ceiling
+            ):
+                cut_idx = assistant_only_cut
 
         # Optional multi-user anchor; n<=1 is gated here (not delegated): re-running the single-user anchor after
         # the assistant anchor could re-trigger its forward turn-pair push. getattr: __new__ doubles skip __init__.
-        _min_tail_users = getattr(self, "min_tail_user_messages", 1)
         if isinstance(_min_tail_users, int) and not isinstance(_min_tail_users, bool) and _min_tail_users > 1:
             cut_idx = self._ensure_last_n_user_messages_in_tail(messages, cut_idx, head_end, _min_tail_users)
 
