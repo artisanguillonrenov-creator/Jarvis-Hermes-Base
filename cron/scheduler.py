@@ -3087,6 +3087,19 @@ def _wait_for_external_cron_worker(
                 pass
 
 
+def _external_cron_worker_python() -> str:
+    """Return the lexical virtualenv interpreter path when one is active."""
+    venv_root = os.environ.get("VIRTUAL_ENV")
+    if not venv_root and sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        venv_root = sys.prefix
+    if venv_root:
+        for name in ("python3", "python"):
+            candidate = Path(venv_root) / "bin" / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return sys.executable
+
+
 def _launch_external_cron_worker(job: dict) -> bool:
     """Launch *job* outside the managed gateway process when required.
 
@@ -3102,7 +3115,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
     payload_path = handoff_dir / f"{execution_id}.json"
     ack_path = handoff_dir / f"{execution_id}.ready"
     command = [
-        sys.executable,
+        _external_cron_worker_python(),
         "-m",
         "cron.scheduler",
         "--external-worker-file",
