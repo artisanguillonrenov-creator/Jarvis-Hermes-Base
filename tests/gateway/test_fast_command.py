@@ -179,7 +179,7 @@ def test_per_model_service_tier_tracks_effective_model_and_session_precedence(mo
     runner = _make_runner()
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "model": {"default": "cheap/model-mini"},
             "agent": {
