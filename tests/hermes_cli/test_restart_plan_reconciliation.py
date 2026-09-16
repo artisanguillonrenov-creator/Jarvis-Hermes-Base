@@ -372,32 +372,32 @@ def test_actionable_unaccounted_still_escalates_including_mixed(capsys):
     )
     assert systemd_serve_out[0]["mechanism"] == "systemd"
     assert systemd_serve_out[0]["outcome"] == "unaccounted"
-        assert report_unaccounted_runtimes(systemd_serve_out) is True
-        serve_out = capsys.readouterr().out
-        # Main only prints the systemd unit recipe on Linux (#100479 follow-up).
-        if sys.platform == "linux":
-            assert "hermes-serve.service" in serve_out
-        else:
-            assert "hermes-serve.service" not in serve_out
-        assert "relaunch `hermes serve`" in serve_out
+    assert report_unaccounted_runtimes(systemd_serve_out) is True
+    serve_out = capsys.readouterr().out
+    # Main only prints the systemd unit recipe on Linux (#100479 follow-up).
+    if sys.platform == "linux":
+        assert "hermes-serve.service" in serve_out
+    else:
+        assert "hermes-serve.service" not in serve_out
+    assert "relaunch `hermes serve`" in serve_out
 
-        desktop_serve = RuntimeRecord(
-            kind="serve",
-            profile="default",
-            pid=88,
-            supervisor="desktop",
-            restart_via=_restart_mechanism("desktop", "default"),
-        )
-        desktop_out = match_runtime_outcomes(
-            _plan(desktop_serve),
-            restarted_services=[], relaunched_profiles=[],
-            externally_supervised_profiles=[], killed_pids=set(), failed_units=[],
-        )
-        assert desktop_out[0]["mechanism"] == "desktop"
-        # Main #111494: a still-alive Desktop-supervised serve is deferred, not unaccounted.
-        assert desktop_out[0]["outcome"] == "deferred"
-        assert report_unaccounted_runtimes(desktop_out) is False
-        capsys.readouterr()  # drain the Desktop deferred notice
+    desktop_serve = RuntimeRecord(
+        kind="serve",
+        profile="default",
+        pid=88,
+        supervisor="desktop",
+        restart_via=_restart_mechanism("desktop", "default"),
+    )
+    desktop_out = match_runtime_outcomes(
+        _plan(desktop_serve),
+        restarted_services=[], relaunched_profiles=[],
+        externally_supervised_profiles=[], killed_pids=set(), failed_units=[],
+    )
+    assert desktop_out[0]["mechanism"] == "desktop"
+    # Main #111494: a still-alive Desktop-supervised serve is deferred, not unaccounted.
+    assert desktop_out[0]["outcome"] == "deferred"
+    assert report_unaccounted_runtimes(desktop_out) is False
+    capsys.readouterr()  # drain the Desktop deferred notice
 
     mixed = match_runtime_outcomes(
         _plan(_rt("default", 119641, supervisor="systemd"), _serve("default", 2124430)),
