@@ -4136,7 +4136,10 @@ export const en: Translations = {
       restoreNext: 'Restore next checkpoint',
       goForward: 'Go forward',
       sendEdited: 'Send edited message',
-      attachingFile: 'Attaching…'
+      attachingFile: 'Attaching…',
+      speechCodeBlockOmitted: ' code block omitted ',
+      speechLink: ' link ',
+      speechTableOmitted: ' table omitted '
     },
     approval: {
       gatewayDisconnected:
