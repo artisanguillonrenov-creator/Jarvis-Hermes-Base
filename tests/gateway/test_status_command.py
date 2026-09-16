@@ -196,8 +196,8 @@ async def test_status_command_uses_most_recent_persisted_model_route(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_status_command_prefers_rehydrated_session_model_override(tmp_path):
-    """A committed /model switch is current before the selected model records usage."""
+async def test_status_command_reads_persisted_override_without_rehydrating(tmp_path):
+    """A durable /model switch displays after restart without activating its runtime."""
     source = _make_source()
     store = SessionStore(sessions_dir=tmp_path / "sessions", config=GatewayConfig())
     session_entry = store.get_or_create_session(source)
@@ -234,13 +234,23 @@ async def test_status_command_prefers_rehydrated_session_model_override(tmp_path
         await runner._record_model_switch(
             result, switch_ctx, source=source, one_turn=False, picker=False
         )
-        # Simulate a restart: /status must lazily recover the durable override.
-        runner._session_state(session_entry.session_key).conversation.model_override = None
+        # New store and runner: exercise persisted routing rather than the old in-memory entry.
+        restarted_store = SessionStore(sessions_dir=store.sessions_dir, config=store.config)
+        runner = _make_runner(session_entry)
+        runner.session_store = restarted_store
+        runner._session_db = AsyncSessionDB(db)
+        assert runner._peek_session_state(session_entry.session_key) is None
 
-        status = await runner._handle_message(_make_event("/status"))
+        with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider") as resolve:
+            status = await runner._handle_message(_make_event("/status"))
 
         assert "**Model:** `model-b` (provider-b)" in status
         assert "**Model:** `model-a` (provider-a)" not in status
+        resolve.assert_not_called()
+        assert runner._peek_session_state(session_entry.session_key) is None
+        assert restarted_store.get_model_override(session_entry.session_key) == {
+            "model": "model-b", "provider": "provider-b", "base_url": "https://b.example/v1",
+        }
     finally:
         db.close()
 
