@@ -140,6 +140,38 @@ def test_discovery_reuses_compat_report_when_sources_are_unchanged(tmp_path, mon
     assert scans == 1
 
 
+def test_compat_report_does_not_reuse_pre_flip_cache_after_removal_gate(tmp_path, monkeypatch):
+    """Desktop report payload embeds in_effect; a pre-date cache must miss after the gate flips."""
+    monkeypatch.setattr(pc, "load_manifest", lambda: MANIFEST)
+    monkeypatch.setattr(pc, "report_file_path", lambda: tmp_path / "r.json")
+    monkeypatch.setattr(pc, "_report_cache", {})
+    plugin = tmp_path / "plugins" / "oldpaths"; plugin.mkdir(parents=True)
+    (plugin / "__init__.py").write_text("from tools.web_tools import prefers_gateway\n")
+    from hermes_cli.plugins_manifest import PluginManifest
+    real = PluginManifest(name="oldpaths", source="user", path=str(plugin))
+    in_effect = False
+    monkeypatch.setattr(pc, "removal_in_effect", lambda today=None: in_effect)
+    scans = 0
+    original_scan = pc.scan_plugin
+
+    def counting_scan(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(pc, "scan_plugin", counting_scan)
+    pc.compat_report([real])
+    data = json.loads((tmp_path / "r.json").read_text())
+    assert data["in_effect"] is False and scans == 1
+    pc.compat_report([real])
+    assert scans == 1
+
+    in_effect = True
+    pc.compat_report([real])
+    data = json.loads((tmp_path / "r.json").read_text())
+    assert data["in_effect"] is True and scans == 2
+
+
 def test_compat_report_source_change_invalidates_cache_and_clears_file(tmp_path, monkeypatch):
     """The Desktop modal reads the report the `serve` backend's discovery wrote — discovery itself must
     write it (not only the CLI banner / doctor / update paths), and clear it once the plugin is fixed."""
