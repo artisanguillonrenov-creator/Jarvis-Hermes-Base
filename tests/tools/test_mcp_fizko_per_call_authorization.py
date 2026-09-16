@@ -160,7 +160,7 @@ def test_mcp_handler_captures_person_header_before_crossing_to_mcp_loop(monkeypa
     assert recorded == [{"Authorization": "Bearer person-token"}]
 
 
-def test_opted_in_fizko_without_turn_token_overrides_profile_authorization_with_empty(monkeypatch):
+def test_opted_in_fizko_without_turn_token_keeps_profile_authorization(monkeypatch):
     from tools import mcp_tool_handlers
 
     recorded = []
@@ -183,7 +183,7 @@ def test_opted_in_fizko_without_turn_token_overrides_profile_authorization_with_
 
     mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
 
-    assert recorded == [{"Authorization": ""}]
+    assert recorded == [None]
 
 
 def test_neighbor_mcp_is_not_given_per_call_headers(monkeypatch):

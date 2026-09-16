@@ -557,7 +557,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # exact turn credential even if ambient context changes meanwhile.
             from agent.turn_authorization import current_fizko_authorization_header
 
-            request_headers = {"Authorization": current_fizko_authorization_header()}
+            person_header = current_fizko_authorization_header()
+            # Profiles are shared by the web chat and channels such as WhatsApp.
+            # Only token-bearing web turns override the connection credential;
+            # ordinary channel turns keep the profile's configured Authorization.
+            if person_header:
+                request_headers = {"Authorization": person_header}
 
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op, retry_safe=read_only):
