@@ -234,6 +234,7 @@ export function BotsPane() {
   const activeConnectionId = host.state.connectionId?.get?.() || 'local'
   const [createOpen, setCreateOpen] = useState(false)
   const [groupCreateOpen, setGroupCreateOpen] = useState(false)
+  const [pairOpen, setPairOpen] = useState(false)
   const [editing, setEditing] = useState<null | RosterRow>(null)
   // `path` is the profile directory the gateway reports on a profiles.list row;
   // it is not part of the shared RosterRow model, so it rides as an extra here.
@@ -459,6 +460,7 @@ export function BotsPane() {
         activeSourceRoster,
         setCreateOpen,
         setGroupCreateOpen,
+        setPairOpen,
         setSectionDialog,
         showRosterTools,
         showRosterSearch,
@@ -511,6 +513,8 @@ export function BotsPane() {
         setCreateOpen,
         groupCreateOpen,
         setGroupCreateOpen,
+        pairOpen,
+        setPairOpen,
         editing,
         setEditing,
         deleting,
