@@ -199,3 +199,40 @@ describe('context-menu mutations hydrate the alias first', () => {
     expect(params).toMatchObject({ name: 'backend-worker', ui_meta: { 'hermes-bots': { pinned: false } } })
   })
 })
+
+describe('the menu toggles mesh visibility (private/public)', () => {
+  // The LABEL reads local meta; the TOGGLE reads the hydrated backend row. When they disagree
+  // the write must flip the backend truth, never the locally-assumed value: a bot whose state
+  // lives elsewhere must not be flipped against a stale local copy.
+  it.each([
+    [false, true],
+    [true, false]
+  ])('backend private=%s: "Make public" writes private=%s through profiles.configure', async (backendPrivate, written) => {
+    ensureBotMetadata.mockResolvedValue({ private: backendPrivate })
+
+    const bot = {
+      connectionId: 'remote-a',
+      name: 'lucky',
+      remoteSource: true,
+      route: { connectionId: 'remote-a', mode: 'remote', profile: 'lucky', targetProfile: 'backend-lucky' },
+      sourceScoped: true
+    } as RosterRow
+
+    const { $botMeta, botMetaKey } = await import('./data')
+
+    $botMeta.set({ ...$botMeta.get(), [botMetaKey(bot)]: { private: true } })
+
+    fireEvent.contextMenu(renderRow(bot))
+    fireEvent.click(await screen.findByText('Make public'))
+    await vi.waitFor(() =>
+      expect(requestProfile.mock.calls.some(([, method]) => method === 'profiles.configure')).toBe(true)
+    )
+
+    expect(ensureBotMetadata).toHaveBeenCalledWith(bot)
+
+    const [route, , params] = requestProfile.mock.calls.find(([, method]) => method === 'profiles.configure')!
+
+    expect(route.profile).toBe('lucky')
+    expect(params).toMatchObject({ name: 'backend-lucky', ui_meta: { 'hermes-bots': { private: written } } })
+  })
+})
