@@ -229,9 +229,9 @@ class GatewayConfigLoadersMixin:
     @classmethod
     def _load_service_tier(cls, model: str = "") -> str | None:
         """Resolve per-model ``agent.service_tier_overrides`` before the global tier."""
-        from gateway.run import _load_gateway_runtime_config
+        from gateway.run import _load_gateway_config
         from hermes_constants import resolve_service_tier_config
-        return resolve_service_tier_config(_load_gateway_runtime_config(), model)
+        return resolve_service_tier_config(_load_gateway_config(), model)
 
     @staticmethod
     def _load_show_reasoning() -> bool:
