@@ -618,6 +618,8 @@ export interface Translations {
       toolViewDesc: string
       reasoningCollapsedTitle: string
       reasoningCollapsedDesc: string
+      continueOnDoubleEnterTitle: string
+      continueOnDoubleEnterDesc: string
       uiScaleTitle: string
       uiScaleDesc: (percent: number) => string
       sessionDensityTitle: string
@@ -2477,6 +2479,7 @@ export interface Translations {
 
   composer: {
     message: string
+    continueNudge: string
     wakingProfile: (profile: string) => string
     placeholderStarting: string
     placeholderReconnecting: string
