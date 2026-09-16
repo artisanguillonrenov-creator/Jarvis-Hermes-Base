@@ -1267,6 +1267,8 @@ export interface Translations {
       pillFitsGpu: string
       pillUsesRam: string
       pillTooBig: string
+      speedPillTip: string
+      speedPillTipSlow: string
       browseTitle: string
       browseHint: string
       browsePlaceholder: string
