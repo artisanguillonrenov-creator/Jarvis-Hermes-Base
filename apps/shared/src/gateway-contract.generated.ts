@@ -2457,6 +2457,7 @@ export interface OnboardingAnswers {
   layout: string | null
   focus: string[]
   connectors: string[]
+  committed: string[]
 }
 export interface ProfilesRememberOnboardingParams {
   profile?: string | null
