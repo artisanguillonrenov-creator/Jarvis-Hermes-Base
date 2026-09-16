@@ -50,7 +50,7 @@ def _empty_status(path: Path) -> str:
 
 def _loaded_status(content: str, rendered_len: int, max_chars: int) -> str:
     """Same scan the builder runs (``_scan_context_content``): a hit replaces the file with a BLOCKED marker."""
-    if _pb._scan_for_threats(content.lstrip("\ufeff"), scope="context"):
+    if _pb._scan_context_file_for_threats(content.lstrip("\ufeff")):
         return "blocked"
     return "truncated" if rendered_len > max_chars else "loaded"
 
