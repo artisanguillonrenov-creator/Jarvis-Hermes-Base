@@ -212,3 +212,43 @@ def test_purge_protects_hermes_logging():
         sys.modules.pop("hermes_logging", None)
         if real is not None:
             sys.modules["hermes_logging"] = real
+
+
+def test_post_pull_refresh_resolves_symbols_the_pull_added(monkeypatch):
+    """The 2026-09-16 field failure (#112558): the pull added ``utils.read_json_or_empty`` and
+    ``utils.file_signature``, and the post-pull phases imported NEW source against the updater's
+    PRE-pull ``utils`` — the deps-phase refresh (``_reload_updated_runtime_modules``) must leave
+    the pulled symbols resolvable for every later phase.
+
+    Reproduces the silent step from the report: the memory-provider dependency refresh
+    (``update_cmd_deps._refresh_active_memory_provider_dependencies`` → ``_install_dependencies``)
+    runs ``hermes_cli/memory_setup.py``'s ``from utils import read_json_or_empty`` and only
+    *warns* when it ImportErrors, so the provider bridge packages silently stay unrestored.
+    """
+    from hermes_cli import update_cmd_maint
+    from hermes_cli.memory_setup import _provider_pip_dependencies
+
+    assert "utils" in update_cmd_maint._UPDATE_RUNTIME_RELOAD_MODULES, (
+        "utils is the shared surface every pulled module imports from; it must be refreshed "
+        "with the other post-pull runtime modules"
+    )
+
+    real = importlib.import_module("utils")
+    stale = types.ModuleType("utils")  # pre-pull world: neither symbol exists yet
+    stale.__spec__ = real.__spec__
+    monkeypatch.setitem(sys.modules, "utils", stale)
+    # Reloading the real 4-module list would re-execute unrelated modules in-process; the
+    # refresh path under test is `_reload_modules` over the list.
+    monkeypatch.setattr(update_cmd_maint, "_UPDATE_RUNTIME_RELOAD_MODULES", ("utils",))
+    try:
+        with pytest.raises(ImportError, match="read_json_or_empty"):
+            _provider_pip_dependencies("hindsight", [])
+
+        update_cmd_maint._reload_updated_runtime_modules()
+
+        # What the pulled `hermes_cli/config.py:33` and `memory_setup.py:35` do.
+        _provider_pip_dependencies("hindsight", [])  # no ImportError
+        from utils import read_json_or_empty  # noqa: F401
+        assert hasattr(sys.modules["utils"], "file_signature")
+    finally:
+        sys.modules["utils"] = real

@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 _RECEIPT_KEEP = 20  # keep the last N receipts per profile home
 COMMAND_BOUNDARY_STOP_REASON = "completed at command boundary"
 
+#: Committed outcome → the exit code the run ends with. The activation path finalizes its receipt
+#: *before* its own ``sys.exit`` (a systemd restart may kill this process), so the real code is
+#: never available there; the boundary safety net sets one explicitly and always wins. See #112558.
+_OUTCOME_EXIT_CODES = {"success": 0, "refused": 2}
+
 # ``hermes update`` is a single-threaded CLI command; a module singleton lets the 7k-line updater
 # record steps from any depth without threading a handle through every helper.
 _current: Optional["UpdateReceipt"] = None
@@ -128,7 +133,9 @@ def begin_update_receipt() -> None:
     try:
         _current = UpdateReceipt()
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Could not start update receipt: %s", exc)
+        # Loud on purpose: this is the "the run leaves NO receipt at all" route, and a DEBUG-only
+        # line made it indistinguishable from a receipt that was never attempted. See #112558.
+        logger.warning("Could not start update receipt: %s", exc)
         _current = None
 
 
@@ -156,34 +163,71 @@ def record_gateway_restart(**kwargs: Any) -> None:
     _record("gateway_restart_result", "gateway restart result", **kwargs)
 
 
+def _write_receipt_body(path: Path, body: str) -> None:
+    """Write one receipt file (seam: the failure path below is exercised by tests)."""
+    path.write_text(body, encoding="utf-8")
+
+
+def _report_receipt_failure(exc: Exception, receipt: "UpdateReceipt", path: Optional[Path]) -> None:
+    """Make a failed receipt write visible AND recoverable. Never raises. See #112558.
+
+    The singleton is popped before the write (exactly-once by construction), so the command
+    boundary cannot retry a failed inner finalize; a field run that hit this left no receipt, no
+    reason and no exit code, because the only trace was a DEBUG line. Log at WARNING (the default
+    level shows it) and keep the collected facts next to where the receipt belongs as
+    ``<name>.json.failed`` instead of dropping them.
+    """
+    logger.warning("Could not write update receipt: %s", exc)
+    try:
+        directory = path.parent if path is not None else _receipt_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        name = path.name if path is not None else f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
+        body = json.dumps(
+            {**receipt.data, "receipt_error": f"{type(exc).__name__}: {exc}",
+             "receipt_error_at": _utc_now_iso()},
+            indent=2, default=str,
+        )
+        (directory / f"{name}.failed").write_text(body, encoding="utf-8")
+    except Exception as exc2:  # pragma: no cover - defensive: the WARNING above is the floor
+        logger.warning("Could not record the failed update receipt either: %s", exc2)
+
+
 def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason: str = "") -> Optional[Path]:
     """Finalize + persist the receipt (``success``/``partial``/``failed``/``refused``); path or None.
 
     Exactly-once by construction: the module singleton is popped first, so a second call (e.g. the
     command-boundary safety net after an inner path already finalized) is a no-op returning None.
+
+    A failed write is NOT silent any more (WARNING + a ``.json.failed`` body on disk) — see
+    ``_report_receipt_failure``.
     """
     global _current
     receipt = _current
     _current = None
     if receipt is None:
         return None
+    path: Optional[Path] = None
     try:
         receipt.finalize(outcome)
         if stop_reason:
             receipt.data["stop_reason"] = stop_reason
         if fleet is not None:
             receipt.data["fleet"] = fleet
+        # The activation path finalizes BEFORE its own sys.exit (a supervisor restart can kill this
+        # process first), so nothing else would ever record the code that run ended with. A boundary
+        # call sets the real one before finalizing, and that always wins. See #112558.
+        receipt.data.setdefault("exit_code", _OUTCOME_EXIT_CODES.get(outcome, 1))
         directory = _receipt_dir()
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
         body = json.dumps(receipt.data, indent=2, default=str)
-        path.write_text(body, encoding="utf-8")
+        _write_receipt_body(path, body)
         with suppress(OSError):  # stable pointer for the dashboard/desktop
             (directory / "latest.json").write_text(body, encoding="utf-8")
         _prune_old_receipts(directory)
         return path
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Could not write update receipt: %s", exc)
+    except Exception as exc:
+        _report_receipt_failure(exc, receipt, path)
         return None
 
 
