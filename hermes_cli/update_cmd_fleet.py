@@ -1116,6 +1116,8 @@ class _GatewayRestartOutcome:
     #: ``scope/name`` of every settled systemd unit; the fleet probe stops waiting for a state stamp
     #: once none of them is active or activating any more (the successor died, nothing will publish).
     restarted_scoped_units: set = field(default_factory=set)
+    #: Windows gateways freshly resumed by this update may have a live PID before their identity stamp.
+    pending_identity_profiles: set = field(default_factory=set)
 
     def fleet_probe_signals(self) -> tuple:
         """``(pre_restart_pids, killed_pids)`` with the unmapped stops removed — the signals that
@@ -1422,27 +1424,47 @@ def _print_legacy_units_warning() -> None:
     print("  (add `sudo` if any are in system scope)")
 
 
-def _collect_fleet_snapshot(restart, rows_expected: bool) -> list:
+def _collect_fleet_snapshot(restart, rows_expected: bool, *, freshly_resumed_profiles: set[str] | None = None) -> list:
     """Fleet version rows, polled over a bounded settle window when runtimes are expected.
 
     Gateways need time to rewrite gateway_state.json; Windows resumes DETACHED (~10s boot),
     so a single 2s sleep reported "no rows" on healthy resumes. A "down" row may be a
-    detached replacement still booting: poll until none remain or the deadline passes.
+    detached replacement still booting. Likewise, an ``unknown`` identity for a profile
+    Windows just resumed is provisional rather than evidence of a legacy gateway: poll
+    until neither transient state remains or the deadline passes.
     Pre-restart PIDs make a gateway stopped WITHOUT verified replacement a DOWN row (exit 1)
     instead of no row at all.
     """
     from hermes_cli.update_receipt import collect_fleet_versions
+    freshly_resumed_profiles = freshly_resumed_profiles or getattr(restart, "pending_identity_profiles", set())
     if not rows_expected:
         return collect_fleet_versions(pre_restart_pids=restart.pre_restart_gateway_pids)
     _fleet_deadline = _time.monotonic() + _FLEET_PROBE_SETTLE_TIMEOUT_SECONDS
     while True:
         _time.sleep(2.0)
-        snapshot = collect_fleet_versions(pre_restart_pids=restart.pre_restart_gateway_pids)
-        if snapshot and not any(row.get("state") == "down" for row in snapshot):
+        snapshot = collect_fleet_versions(
+            pre_restart_pids=restart.pre_restart_gateway_pids,
+            pending_identity_profiles=freshly_resumed_profiles,
+        )
+        if snapshot and not any(row.get("state") in {"down", "pending_identity"} for row in snapshot):
             return snapshot
         if _time.monotonic() >= _fleet_deadline or _restarted_units_gone(
                 getattr(restart, "restarted_scoped_units", ())):
             return snapshot
+
+
+def _freshly_resumed_windows_profiles(token) -> set[str]:
+    """Profiles whose Windows relaunch may not have stamped identity yet."""
+    if not isinstance(token, dict):
+        return set()
+    profiles = {str(profile) for profile in token.get("relaunched_profiles") or [] if profile}
+    service_profiles = token.get("service_profiles") or {}
+    profiles.update(
+        str(service_profiles[service])
+        for service in token.get("restarted_services") or []
+        if service_profiles.get(service)
+    )
+    return profiles
 
 
 def _restarted_units_gone(scoped_units) -> bool:
@@ -1518,6 +1540,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
         _fleet_rows_expected = _m()._fleet_probe_expected_runtimes(
             _pre_update_plan, _pre_restart, _windows_gateway_resume, restart.restarted_services, _killed,
         )
+        restart.pending_identity_profiles = _freshly_resumed_windows_profiles(_windows_gateway_resume)
         _fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)
         if print_fleet_version_matrix(_fleet_snapshot):
             restart.incomplete = True

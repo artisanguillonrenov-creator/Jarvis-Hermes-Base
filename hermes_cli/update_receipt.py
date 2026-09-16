@@ -274,11 +274,20 @@ def _fleet_row(
     }
 
 
+def _mark_pending_identity(row: dict[str, Any], profile: str, pending_profiles: set[str]) -> dict[str, Any]:
+    """Mark an unstamped row from a just-resumed gateway as provisional."""
+    if row["state"] == "unknown" and profile in pending_profiles:
+        row["state"] = "pending_identity"
+    return row
+
+
 # Runtime-status states that do not describe a gateway that should be running now — no down row.
 _NOT_EXPECTED_STATES = {"stopped", "startup_failed"}
 
 
-def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> list[dict[str, Any]]:
+def collect_fleet_versions(
+    *, pre_restart_pids: Optional[list[int]] = None, pending_identity_profiles: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
     """Snapshot every profile's gateway code identity vs. the current tree.
 
     Rollout safety: ``down`` requires membership in ``pre_restart_pids`` — a stale state file from a
@@ -297,6 +306,7 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
     verification gap, #88848/#74973 class).
     """
     _pre_restart = {int(p) for p in (pre_restart_pids or []) if isinstance(p, int)}
+    _pending_identity_profiles = set(pending_identity_profiles or ())
     results: list[dict[str, Any]] = []
     expected_sha = _code_identity(refresh=True).get("sha")
     try:
@@ -311,7 +321,7 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
             if sock is not None:
                 pid, identity = sock
                 row = _fleet_row(profile, pid, identity.get("code_sha"), identity.get("code_version"), expected_sha)
-                results.append({**row, "source": "socket"})
+                results.append({**_mark_pending_identity(row, profile, _pending_identity_profiles), "source": "socket"})
                 continue
             record = read_runtime_status(home / "gateway_state.json")
             if not record:
@@ -324,16 +334,17 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
             # its own PID only when the profile's canonical identity resolver
             # verifies that same live gateway.
             if live_gateway_pid_for_home(home) == pid:
-                results.append(
-                    _fleet_row(profile, pid, record.get("code_sha"), record.get("code_version"), expected_sha)
-                )
+                row = _fleet_row(profile, pid, record.get("code_sha"), record.get("code_version"), expected_sha)
+                results.append(_mark_pending_identity(row, profile, _pending_identity_profiles))
                 continue
             # A live non-gateway (or a gateway for another profile) can write a
             # plausible state file. Keep the fail-open visibility row, but never
             # let that file's self-reported SHA or version classify or label
             # the process — both claims have the same trust problem.
             if runtime_status_pid_is_live(record):
-                results.append(_fleet_row(profile, pid, None, None, None))
+                results.append(_mark_pending_identity(
+                    _fleet_row(profile, pid, None, None, None), profile, _pending_identity_profiles
+                ))
                 continue
             # Dead PID (or a live PID recycled by an unrelated process during the update's own
             # churn): a DOWN row only when this exact pid was alive at update start AND the record
@@ -357,6 +368,7 @@ _FLEET_ROW_LINES = {
     "down": "  ✗ {profile} — DOWN (gateway was running before the update; pid {pid} is gone and nothing replaced it)",
 }
 _FLEET_ROW_UNKNOWN = "  ? {profile} (pid {pid}) — version unknown (gateway predates version stamping; restart to enable)"
+_FLEET_ROW_PENDING_IDENTITY = "  … {profile} (pid {pid}) — still publishing its code identity after restart"
 
 
 def print_fleet_version_matrix(fleet: list[dict[str, Any]]) -> bool:
@@ -376,7 +388,11 @@ def print_fleet_version_matrix(fleet: list[dict[str, Any]]) -> bool:
     for entry in fleet:
         sha = entry.get("code_sha")
         states.add(entry.get("state"))
-        print(_FLEET_ROW_LINES.get(entry.get("state"), _FLEET_ROW_UNKNOWN).format(
+        state = entry.get("state")
+        row_format = _FLEET_ROW_PENDING_IDENTITY if state == "pending_identity" else _FLEET_ROW_LINES.get(
+            state, _FLEET_ROW_UNKNOWN
+        )
+        print(row_format.format(
             profile=entry.get("profile"), pid=entry.get("pid"), short=sha[:8] if isinstance(sha, str) and sha else "?",
         ))
     stale_or_down = sum(1 for entry in fleet if entry.get("state") in ("stale", "down"))

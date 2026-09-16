@@ -266,7 +266,7 @@ class TestCommandBoundaryFinalization:
 
 
 class TestFleetClassification:
-    def _fleet_with(self, monkeypatch, tmp_path, record, expected_sha="a" * 40):
+    def _fleet_with(self, monkeypatch, tmp_path, record, expected_sha="a" * 40, pending_identity_profiles=None):
         """Run collect_fleet_versions against one fake default profile."""
         home = tmp_path / "fleet_home"
         home.mkdir()
@@ -296,7 +296,7 @@ class TestFleetClassification:
             "gateway.status.live_gateway_pid_for_home",
             lambda candidate_home: gateway_record["pid"],
         )
-        return ur.collect_fleet_versions()
+        return ur.collect_fleet_versions(pending_identity_profiles=pending_identity_profiles)
 
     def test_live_non_gateway_state_writer_is_unknown(self, monkeypatch, tmp_path):
         """A state file written by this non-gateway pytest process proves no gateway is current."""
@@ -353,6 +353,12 @@ class TestFleetClassification:
             monkeypatch, tmp_path, {"pid": 4242}, expected_sha="a" * 40
         )
         assert fleet[0]["state"] == "unknown"
+
+    def test_freshly_resumed_unstamped_gateway_is_pending_identity(self, monkeypatch, tmp_path):
+        fleet = self._fleet_with(
+            monkeypatch, tmp_path, {"pid": 4242}, pending_identity_profiles={"default"}
+        )
+        assert fleet[0]["state"] == "pending_identity"
 
     def test_dead_pid_excluded(self, monkeypatch, tmp_path):
         home = tmp_path / "fleet_home2"
@@ -425,6 +431,15 @@ class TestFleetClassification:
         )
         assert ok is False
         assert "version unknown" in capsys.readouterr().out
+
+    def test_pending_identity_has_restart_copy_not_legacy_copy(self, capsys):
+        ok = ur.print_fleet_version_matrix(
+            [{"profile": "default", "pid": 1, "code_sha": None, "state": "pending_identity"}]
+        )
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "still publishing its code identity after restart" in out
+        assert "predates version stamping" not in out
 
 
 class TestGatewayStatusStamping:

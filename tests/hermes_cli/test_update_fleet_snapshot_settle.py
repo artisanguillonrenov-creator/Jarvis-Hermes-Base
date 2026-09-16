@@ -52,6 +52,30 @@ def test_snapshot_waits_for_late_current_gateway_state(monkeypatch) -> None:
     assert clock.now <= update_cmd_fleet._FLEET_PROBE_SETTLE_TIMEOUT_SECONDS
 
 
+def test_snapshot_waits_for_identity_from_a_freshly_resumed_windows_gateway(monkeypatch) -> None:
+    """An unknown row from a just-resumed profile is provisional, not legacy."""
+    clock = _FakeClock()
+    pending = {"profile": "default", "pid": 202, "code_sha": None, "state": "pending_identity"}
+    current = {"profile": "default", "pid": 202, "code_sha": "new", "state": "current"}
+    snapshots = iter([[pending], [pending], [current]])
+
+    monkeypatch.setattr(update_cmd_fleet._time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(update_cmd_fleet._time, "sleep", clock.sleep)
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt.collect_fleet_versions",
+        lambda **_kwargs: next(snapshots),
+    )
+
+    restart = SimpleNamespace(pre_restart_gateway_pids=[101])
+
+    result = update_cmd_fleet._collect_fleet_snapshot(
+        restart, rows_expected=True, freshly_resumed_profiles={"default"}
+    )
+
+    assert result == [current]
+    assert clock.sleeps == [2.0, 2.0, 2.0]
+
+
 def test_snapshot_stops_waiting_once_the_restarted_unit_is_dead(monkeypatch) -> None:
     """A successor that exits (unit failed/inactive) fails closed at once, not at the 120s deadline."""
     clock = _FakeClock()
