@@ -70,13 +70,9 @@ _RESERVED_HANDLES = frozenset({"all", "everyone", "user", "default", "hermes"})
 
 
 def _display_handle(profile_dir: Path) -> str:
-    """Slugged ``display_name`` of the profile at ``profile_dir``, or "" when unusable.
-
-    The slug charset matches the Desktop's mention charset, so the handle stamped into
-    attribution is the same one autocomplete inserts and the relay roster carries. Reserved
-    or empty slugs return "" and the caller keeps the canonical handle — fail-safe, never
-    fail-weird.
-    """
+    """Slugged ``display_name`` of the profile at ``profile_dir``, or "" when empty or reserved
+    (the caller keeps the canonical handle). Same charset as the Desktop's mention tags, so the
+    handle in attribution is the one autocomplete inserts and the relay roster carries."""
     def _read() -> str:
         from hermes_cli.profiles import read_profile_meta
         return str(read_profile_meta(Path(profile_dir)).get("display_name") or "")
@@ -86,14 +82,9 @@ def _display_handle(profile_dir: Path) -> str:
 
 
 def _handle(name: str, profile_dir: Path | None = None) -> str:
-    """The wire handle for the profile ``name``.
-
-    ``profile_dir`` is that profile's own directory, so a renamed agent is addressed by its
-    display_name — the identity the recipient sees and autocomplete inserts. It is a
-    parameter rather than a read of the running process's home precisely because most call
-    sites ask about a TEAMMATE, not about self; reading self there renamed every teammate to
-    the running profile.
-    """
+    """The wire handle for profile ``name``: its display_name slug when ``profile_dir`` (that
+    profile's OWN directory) carries one, else the canonical handle. A parameter, not a read of
+    the running home: most call sites ask about a teammate, not self."""
     if profile_dir is not None:
         display = _display_handle(profile_dir)
         if display:

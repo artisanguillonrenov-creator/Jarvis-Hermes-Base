@@ -231,7 +231,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     content = f"Message from 🤖 {my_handle} (@{my_handle}): " + body
     delivery = dict(task_id=task_id, agent=agent)
     # Attribution for the recipient's memory hooks; the text prefix above stays the human-facing signature.
-    author = {"id": f"bot:{me}", "name": _handle(me), "is_bot": True}
+    author = {"id": f"bot:{me}", "name": my_handle, "is_bot": True}
 
     # Peer target: '<peer>/<agent>' or a bare registered peer name.
     peer_match = _PEER_TARGET_RE.match(raw_target)
@@ -264,7 +264,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
         # Unknown locally, or same-name target on ANOTHER connection (this gateway's 'default'
         # messaging the cloud 'default'): every Desktop-connected gateway is reachable via the
         # relay roster, so try that before reporting a resolution failure / self-message.
-        relayed = _try_relay_delivery(root, raw_target, content, me, my_handle, **delivery)
+        relayed = _try_relay_delivery(root, raw_target, content, me, **delivery)
         if relayed is not None:
             return relayed
         if resolved == me:
@@ -277,14 +277,14 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
                            stdin_file=False, profile_home=roster_homes[resolved], author=author, **delivery)
 
 
-def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, my_handle: str, *,
+def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
                         task_id: Optional[str], agent: Any) -> Optional[str]:
     """Cross-connection delivery via the Desktop relay; None when the target doesn't
     resolve against the relay roster. The envelope is queued on disk for the Desktop
     to drain; a background waiter is spawned immediately so the relayed reply wakes
     the sender through the standard completion-notification path."""
     try:
-        from tools.bot_mode_probe import _handle
+        from tools.bot_mode_probe import _handle, _profile_dir
         from tools.bot_relay import (
             EnvelopeRefusedError, enqueue_envelope, read_remote_roster, resolve_remote_target, waiter_command,
         )
@@ -299,7 +299,7 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, my_h
             return _err(f"'{raw_target}' exists on several connected machines — disambiguate with one of: {forms}.")
         try:
             envelope = enqueue_envelope(root, target=match, message=content, sender_profile=me,
-                                        sender_handle=my_handle)
+                                        sender_handle=_handle(me, _profile_dir(root, me)))
         except EnvelopeRefusedError as exc:
             # Fail fast: target definitively offline — nothing was queued.
             # Structured refusal so the agent can distinguish it from a resolution error ('runtime_offline'

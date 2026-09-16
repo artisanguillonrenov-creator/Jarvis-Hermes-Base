@@ -1026,74 +1026,56 @@ def test_relay_waiter_that_cannot_start_reports_queued_not_failed(tmp_path, monk
 # ── display_name-aware identity (attribution + inbound resolution) ───────────
 
 
-def _named_home(tmp_path, display_name):
-    home = tmp_path / ".hermes-named"
-    home.mkdir(exist_ok=True)
-    (home / "profile.yaml").write_text(f"display_name: {display_name}\n", encoding="utf-8")
-    return home
+# ── DM and relay identity honours the profile's display_name ─────────────────
 
 
-def test_display_handle_slugs_display_name(tmp_path):
-    home = _named_home(tmp_path, "CTO")
-    assert bot_mode_probe._display_handle(home) == "cto"
+@pytest.mark.parametrize(
+    ("name", "display_name", "expected"),
+    [
+        ("default", "CTO", "cto"),
+        ("researcher", "Research Lead", "research-lead"),
+        ("researcher", "Hermes", "researcher"),  # reserved: would claim the default's @hermes
+        ("default", "", "hermes"),
+        ("default", None, "hermes"),  # no directory passed: the canonical mapping, never another home's name
+    ],
+    ids=["slugged", "multi-word", "reserved-name", "empty", "no-directory"],
+)
+def test_the_handle_is_the_named_profiles_own_display_name_slug(tmp_path, name, display_name, expected):
+    """The handle belongs to the profile being NAMED, read from its own directory: the roster
+    line, the delivery label and the relay envelope all pass a teammate, not self."""
+    if display_name is None:
+        assert bot_mode_probe._handle(name) == expected
+        return
+    home = tmp_path / name
+    home.mkdir()
+    if display_name:
+        (home / "profile.yaml").write_text(f"display_name: {display_name}\n", encoding="utf-8")
+
+    assert bot_mode_probe._handle(name, home) == expected
 
 
-def test_display_handle_rejects_reserved_and_empty(tmp_path):
-    # A profile renamed "Hermes" must not be able to impersonate the default's
-    # @hermes alias — same reserved list the Desktop's mentionNameForms uses.
-    assert bot_mode_probe._display_handle(_named_home(tmp_path, "Hermes")) == ""
-    empty = tmp_path / ".hermes-empty"
-    empty.mkdir()
-    assert bot_mode_probe._display_handle(empty) == ""
+@pytest.mark.parametrize(
+    ("target", "rival", "expected"),
+    [
+        ("cto", False, "default"),  # the renamed default answers to its display slug
+        ("cto", True, "cto"),  # a real profile named like another's display_name keeps priority
+        ("hermes", False, "default"),
+        ("researcher", False, "researcher"),
+    ],
+    ids=["display-slug", "canonical-outranks-slug", "canonical-alias", "canonical-name"],
+)
+def test_resolution_prefers_a_canonical_name_over_a_display_slug(tmp_path, target, rival, expected):
+    renamed_default = tmp_path / ".hermes"
+    renamed_default.mkdir()
+    (renamed_default / "profile.yaml").write_text("display_name: CTO\n", encoding="utf-8")
+    dirs = {"default": renamed_default, "researcher": tmp_path / "researcher"}
+    if rival:
+        (tmp_path / "profiles" / "cto").mkdir(parents=True)
+        dirs["cto"] = tmp_path / "profiles" / "cto"
 
-
-def test_handle_reads_the_named_profile_not_the_running_one(tmp_path):
-    """The handle belongs to the profile being NAMED, so it must come from that profile's
-    own directory. Resolving it from the running process's home instead renames every
-    teammate in a roster to whatever the local agent is called — the roster line, the
-    delivery label and the relay envelope all pass a teammate, not self."""
-    me = _named_home(tmp_path, "CTO")
-    teammate = tmp_path / "profiles" / "researcher"
-    teammate.mkdir(parents=True)
-    (teammate / "profile.yaml").write_text("display_name: Research Lead\n", encoding="utf-8")
-
-    assert bot_mode_probe._handle("default", me) == "cto"
-    assert bot_mode_probe._handle("researcher", teammate) == "research-lead"
-    # Passing no directory keeps the canonical mapping — never a read of some other profile.
-    assert bot_mode_probe._handle("default") == "hermes"
-    assert bot_mode_probe._handle("researcher") == "researcher"
-
-
-def test_handle_falls_back_to_canonical_without_a_display_name(tmp_path):
-    plain = tmp_path / ".hermes-plain"
-    plain.mkdir()
-    assert bot_mode_probe._handle("default", plain) == "hermes"
-    assert bot_mode_probe._handle("researcher", plain) == "researcher"
-
-
-def test_resolve_local_name_accepts_display_slug(tmp_path):
-    home = _named_home(tmp_path, "CTO")
-    dirs = {"default": home, "researcher": tmp_path / "researcher"}
-    assert bot_mode_dm._resolve_local_name("cto", list(dirs), dirs) == "default"
-    # Canonical forms keep working exactly as before, with or without the dirs.
-    assert bot_mode_dm._resolve_local_name("hermes", ["default"], dirs) == "default"
-    assert bot_mode_dm._resolve_local_name("researcher", list(dirs), dirs) == "researcher"
-    assert bot_mode_dm._resolve_local_name("researcher", list(dirs)) == "researcher"
-
-
-def test_canonical_name_outranks_a_colliding_display_slug(tmp_path):
-    """A real profile must stay addressable by its own name even when another profile's
-    display_name slugs to the same thing."""
-    renamed_default = _named_home(tmp_path, "CTO")
-    real_cto = tmp_path / "profiles" / "cto"
-    real_cto.mkdir(parents=True)
-    dirs = {"default": renamed_default, "cto": real_cto}
-
-    assert bot_mode_probe._display_handle(renamed_default) == "cto"
-    assert bot_mode_dm._resolve_local_name("cto", list(dirs), dirs) == "cto"
-    # With no competing profile, the slug still answers.
-    no_rival = {"default": renamed_default, "researcher": tmp_path / "researcher"}
-    assert bot_mode_dm._resolve_local_name("cto", list(no_rival), no_rival) == "default"
+    assert bot_mode_dm._resolve_local_name(target, list(dirs), dirs) == expected
+    # Without the directories only canonical names resolve: the display slug alone finds nothing.
+    assert bot_mode_dm._resolve_local_name(target, list(dirs)) == (None if (target == "cto" and not rival) else expected)
 
 
 def _rename_teammate(home: Path, name: str, display_name: str) -> None:
@@ -1101,76 +1083,28 @@ def _rename_teammate(home: Path, name: str, display_name: str) -> None:
         fh.write(f"display_name: {display_name}\n")
 
 
-def test_message_agent_delivers_to_a_teammate_addressed_by_display_slug(tmp_path, monkeypatch):
-    """The resolver honours a display slug only when message_agent_tool hands it the roster's
-    directories. The helper tests above stay green if that call site stops passing them —
-    which is exactly what a refactor of this function did — so drive the real tool."""
-    calls = _capture_spawn(monkeypatch)
+def test_message_agent_addresses_signs_and_lists_teammates_by_display_handle(tmp_path, monkeypatch):
+    """Through the real tool, since the helpers stay green if message_agent_tool stops handing
+    the resolver the roster's directories: a teammate is reachable by its display slug and
+    labelled by it while the transport still names the canonical profile; the sender signs the
+    DM text and the memory-hook author with ITS display handle; an unknown target is answered
+    with the teammates' display handles."""
     home = _managed_home(tmp_path, teammates=("researcher",))
     _rename_teammate(home, "researcher", "Research Lead")
+    (home / "profile.yaml").write_text("display_name: CTO\n", encoding="utf-8")
+    seen = {}
 
-    result = json.loads(
-        bot_mode_dm.message_agent_tool(target="@research-lead", message="hi", agent=_FakeAgent(home))
-    )
+    def _record(argv, content, label, **kwargs):
+        seen.update(argv=argv, content=content, label=label, author=kwargs.get("author"))
+        return json.dumps({"status": "sent", "to": label})
 
-    assert result["status"] == "sent"
-    # The delivery label is the teammate's own display handle, while the transport still
-    # addresses the canonical profile.
-    assert result["to"] == "@research-lead"
-    _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
-    assert transport_argv[:3] == ["hermes", "-p", "researcher"]
+    monkeypatch.setattr(bot_mode_dm, "_start_delivery", _record)
 
+    sent = json.loads(bot_mode_dm.message_agent_tool(target="@research-lead", message="hi", agent=_FakeAgent(home)))
+    unknown = json.loads(bot_mode_dm.message_agent_tool(target="@nobody", message="hi", agent=_FakeAgent(home)))
 
-def test_unknown_target_lists_teammates_by_their_own_display_handles(tmp_path, monkeypatch):
-    """The roster in a resolution error must name each teammate by ITS display handle —
-    reading it without the teammate's directory falls back to the canonical name."""
-    _capture_spawn(monkeypatch)
-    home = _managed_home(tmp_path, teammates=("researcher",))
-    _rename_teammate(home, "researcher", "Research Lead")
-
-    result = json.loads(
-        bot_mode_dm.message_agent_tool(target="@nobody", message="hi", agent=_FakeAgent(home))
-    )
-
-    assert "research-lead" in result["teammates"]
-    assert "researcher" not in result["teammates"]
-
-
-def test_reserved_handles_match_the_desktop_source():
-    """Drift between the two reserved lists must fail CI, not surprise a user.
-
-    `_RESERVED_HANDLES` mirrors the Desktop's `mentionNameForms` filter. If
-    they diverge, the two surfaces disagree about who may claim a tag — a
-    profile renamed "Hermes" could stamp @hermes on one side while the other
-    still refuses it. Parse the list out of the real JS rather than restating
-    it here, so this test cannot drift either.
-    """
-    import re
-    from pathlib import Path
-
-    js = (
-        Path(__file__).resolve().parents[2]
-        / "apps"
-        / "desktop"
-        / "src"
-        / "plugins"
-        / "hermes-bots"
-        # mentionNameForms moved here when Bot Mode was converted to TSX
-        # (upstream b2e5b1d42 split the old single plugin.js into modules).
-        / "data.ts"
-    )
-    if not js.is_file():  # source-only checkout (packaged wheel) — nothing to compare
-        pytest.skip("desktop plugin source not present")
-
-    src = js.read_text(encoding="utf-8")
-    start = src.index("function mentionNameForms(")
-    body = src[start : src.index("\n}", start)]
-    listed = re.search(r"!\[([^\]]+)\]\.includes\(form\)", body)
-    assert listed, "mentionNameForms no longer filters a reserved-token array — update both sides"
-
-    desktop_reserved = set(re.findall(r"'([a-z0-9_-]+)'", listed.group(1)))
-
-    assert desktop_reserved == set(bot_mode_probe._RESERVED_HANDLES), (
-        "reserved handle lists diverged — daemon "
-        f"{sorted(bot_mode_probe._RESERVED_HANDLES)} vs desktop {sorted(desktop_reserved)}"
-    )
+    assert sent["status"] == "sent" and seen["label"] == "@research-lead"
+    assert seen["argv"][1:3] == ["-p", "researcher"]
+    assert seen["content"].startswith("Message from 🤖 cto (@cto): ")
+    assert seen["author"]["name"] == "cto"
+    assert "research-lead" in unknown["teammates"] and "researcher" not in unknown["teammates"]

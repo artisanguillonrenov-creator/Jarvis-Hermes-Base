@@ -416,45 +416,16 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
     stopBotRelay()
   })
 
-  it('publishes a renamed profile by its display_name slug', async () => {
-    // The roster handle is what attribution stamps and autocomplete insert, so
-    // a default renamed "CTO" must be addressable as @cto rather than @hermes.
+  it('publishes a renamed profile by its display_name slug, never a reserved one', async () => {
+    // The roster handle is what attribution stamps and autocomplete insert, so a default
+    // renamed "CTO" is addressable as @cto; a profile renamed "Hermes" keeps its canonical
+    // handle because mentionNameForms drops reserved tokens.
     const calls = respondWith(call => {
       if (call.method === 'profiles.list') {
         return {
           profiles: [
             call.connectionId === 'a'
               ? { display_name: 'CTO', name: 'default' }
-              : { name: 'ops' }
-          ]
-        }
-      }
-
-      return {}
-    })
-
-    const { startBotRelay, stopBotRelay } = await loadRelay()
-
-    startBotRelay()
-    await vi.advanceTimersByTimeAsync(0)
-
-    const syncs = calls.filter(call => call.method === 'bot_relay.roster.sync')
-
-    expect(syncs[1].params.agents).toEqual([
-      expect.objectContaining({ handle: 'cto', profile: 'default' })
-    ])
-
-    stopBotRelay()
-  })
-
-  it('refuses to let a renamed profile claim the reserved hermes alias', async () => {
-    // mentionNameForms drops reserved tokens, so the canonical handle stands.
-    const calls = respondWith(call => {
-      if (call.method === 'profiles.list') {
-        return {
-          profiles: [
-            call.connectionId === 'a'
-              ? { name: 'default' }
               : { display_name: 'Hermes', name: 'ops' }
           ]
         }
@@ -470,9 +441,8 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
 
     const syncs = calls.filter(call => call.method === 'bot_relay.roster.sync')
 
-    expect(syncs[0].params.agents).toEqual([
-      expect.objectContaining({ handle: 'ops', profile: 'ops' })
-    ])
+    expect(syncs[0].params.agents).toEqual([expect.objectContaining({ handle: 'ops', profile: 'ops' })])
+    expect(syncs[1].params.agents).toEqual([expect.objectContaining({ handle: 'cto', profile: 'default' })])
 
     stopBotRelay()
   })
