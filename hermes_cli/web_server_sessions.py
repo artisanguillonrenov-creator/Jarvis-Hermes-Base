@@ -73,6 +73,25 @@ def _session_latest_descendant(session_id: str, db):
 # ("no such table: sessions").
 _session_db_bootstrap_lock = threading.Lock()
 
+# pysqlite can crash when dashboard startup workers initialize and tear down
+# separate read-only handles for the same store at once (#113186). Locks are
+# per-store so a slow or malformed profile cannot stall healthy profiles.
+_session_db_startup_reconcile_locks: Dict[Path, threading.RLock] = {}
+_session_db_startup_reconcile_locks_guard = threading.Lock()
+
+
+def _session_db_startup_reconcile_lock_for(db_path: Path) -> threading.RLock:
+    """Return the process-local reconcile lock for one normalized store path."""
+    try:
+        key = db_path.resolve()
+    except OSError:
+        key = db_path
+    with _session_db_startup_reconcile_locks_guard:
+        lock = _session_db_startup_reconcile_locks.get(key)
+        if lock is None:
+            lock = _session_db_startup_reconcile_locks[key] = threading.RLock()
+        return lock
+
 
 def _session_db_read_probe_statements() -> tuple:
     """Stale-schema probes for read-only opens (which skip _reconcile_columns()).
@@ -99,7 +118,7 @@ def _is_stale_schema_error(exc: BaseException) -> bool:
     return "no such table" in message or "no such column" in message
 
 
-def _open_session_db_at_path(db_path: Path, *, read_only: bool):
+def _open_session_db_at_path_unlocked(db_path: Path, *, read_only: bool):
     """Open a SessionDB at an explicit path with an explicit access mode.
 
     Read-only opens bootstrap a missing/zero-byte store once and heal a stale or
@@ -178,6 +197,14 @@ def _open_session_db_at_path(db_path: Path, *, read_only: bool):
                     db_path,
                     still_stale)
             return _open_probed()
+
+
+def _open_session_db_at_path(db_path: Path, *, read_only: bool):
+    """Open a dashboard SessionDB without overlapping read-only initialization."""
+    if not read_only:
+        return _open_session_db_at_path_unlocked(db_path, read_only=False)
+    with _session_db_startup_reconcile_lock_for(db_path):
+        return _open_session_db_at_path_unlocked(db_path, read_only=True)
 
 
 def _session_db_path_for_profile(profile: Optional[str]) -> Path:
