@@ -26,3 +26,10 @@ def test_enabled_when_flag_explicitly_true():
     )
     assert enabled is True
 
+
+@pytest.mark.parametrize("value", [False, "true", "false", 1, 0, None, [], {}])
+def test_invalid_or_non_boolean_values_fail_closed(value):
+    enabled, _ = _resolve_auto_decompose_settings(
+        lambda: {"kanban": {"auto_decompose": value}}
+    )
+    assert enabled is False
