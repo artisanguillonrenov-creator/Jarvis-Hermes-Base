@@ -14,6 +14,14 @@ from agent.turn_authorization import (
 from tui_gateway import server as srv
 
 
+def _authorization(raw, *, expires_at=None):
+    if raw is None:
+        return TurnAuthorization.from_raw(None)
+    return TurnAuthorization.from_raw(
+        raw, expires_at=time.time() + 3600 if expires_at is None else expires_at
+    )
+
+
 class _InlineThread:
     def __init__(self, target=None, daemon=None, args=(), kwargs=None):
         self._target, self._args, self._kwargs = target, args, kwargs or {}
@@ -61,6 +69,35 @@ def test_prompt_submit_rejects_malformed_token_after_popping_it():
     assert params == {"session_id": "missing", "text": "hello"}
 
 
+def test_prompt_submit_rejects_person_token_without_expiry():
+    response = srv._methods["prompt.submit"](
+        "r",
+        {
+            "session_id": "missing",
+            "text": "hello",
+            "_fizko_person_access_token": "person-token",
+        },
+    )
+
+    assert response["error"]["code"] == 4004
+    assert "expiry is required" in response["error"]["message"]
+
+
+def test_prompt_submit_rejects_expired_person_token():
+    response = srv._methods["prompt.submit"](
+        "r",
+        {
+            "session_id": "missing",
+            "text": "hello",
+            "_fizko_person_access_token": "person-token",
+            "_fizko_person_access_token_expires_at": time.time() - 1,
+        },
+    )
+
+    assert response["error"]["code"] == 4004
+    assert "expired" in response["error"]["message"]
+
+
 def test_person_authorized_submit_fails_closed_when_compute_isolation_is_required(monkeypatch):
     session = _session(types.SimpleNamespace())
     monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: True)
@@ -72,6 +109,7 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
                 "session_id": "sid",
                 "text": "hello",
                 "_fizko_person_access_token": "person-token",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
             },
         )
     finally:
@@ -83,7 +121,7 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
 
 
 def test_queued_person_authorized_turn_does_not_bypass_compute_isolation(monkeypatch):
-    holder = TurnAuthorization.from_raw("queued-person")
+    holder = _authorization("queued-person")
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = {
         "text": "queued work",
@@ -103,7 +141,7 @@ def test_queued_person_authorized_turn_does_not_bypass_compute_isolation(monkeyp
 
 
 def test_expired_queued_person_authorization_is_dropped_fail_closed(monkeypatch):
-    holder = TurnAuthorization.from_raw("expired-person", expires_at=time.time() - 1)
+    holder = _authorization("expired-person", expires_at=time.time() - 1)
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = {
         "text": "queued work",
@@ -126,6 +164,82 @@ def test_expired_queued_person_authorization_is_dropped_fail_closed(monkeypatch)
     assert "_active_turn_authorization" not in session
     assert events and events[0][0] == "error"
     assert "expired" in events[0][2]["message"]
+
+
+def test_expired_queued_head_does_not_block_later_static_prompt(monkeypatch):
+    expired = _authorization("expired-person", expires_at=time.time() - 1)
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = {
+        "text": "expired work", "transport": None, "turn_authorization": expired,
+    }
+    session["queued_prompts"] = [{"text": "ordinary work", "transport": None}]
+    events = []
+    dispatched = []
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda _rid, _sid, _session, text, **kwargs: dispatched.append((text, kwargs)) or True,
+    )
+
+    assert srv._drain_queued_prompt("r", "sid", session) is True
+
+    assert [text for text, _kwargs in dispatched] == ["ordinary work"]
+    assert "turn_authorization" not in dispatched[0][1]
+    assert any("expired" in args[2]["message"] for args in events)
+
+
+def test_rejected_queue_batch_schedules_bounded_continuation(monkeypatch):
+    expired = _authorization("expired-person", expires_at=time.time() - 1)
+    rejected = {"text": "expired", "transport": None, "turn_authorization": expired}
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = dict(rejected)
+    session["queued_prompts"] = [dict(rejected) for _ in range(32)] + [
+        {"text": "ordinary", "transport": None}
+    ]
+    dispatched = []
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(srv, "_emit", lambda *_args: None)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda _rid, _sid, _session, text, **kwargs: dispatched.append(text) or True,
+    )
+
+    class _ImmediateThread:
+        def __init__(self, *, target, args, daemon):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(srv.threading, "Thread", _ImmediateThread)
+
+    assert srv._drain_queued_prompt("r", "sid", session) is True
+    assert dispatched == ["ordinary"]
+    assert session.get("queued_prompt") is None
+
+
+def test_personal_post_turn_steer_keeps_blocked_descendant_marker(monkeypatch):
+    session = _session(types.SimpleNamespace())
+    blocked = TurnAuthorization.blocked()
+    monkeypatch.setattr(srv, "_drain_queued_prompt", lambda *_args: True)
+
+    srv._run_post_turn_followups(
+        "r",
+        "sid",
+        session,
+        {"pending_steer": "continue safely"},
+        None,
+        descendant_authorization=blocked,
+    )
+
+    queued = session["queued_prompt"]
+    assert queued["turn_authorization"] is blocked
+    assert queued["turn_authorization"].is_personal is True
+    assert queued["turn_authorization"].has_token is False
 
 
 def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monkeypatch, tmp_path):
@@ -179,8 +293,8 @@ def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monk
 def test_different_person_cannot_redirect_or_interrupt_the_active_turn(monkeypatch):
     redirects = []
     interrupts = []
-    active = TurnAuthorization.from_raw("active-person")
-    incoming = TurnAuthorization.from_raw("incoming-person")
+    active = _authorization("active-person")
+    incoming = _authorization("incoming-person")
     agent = types.SimpleNamespace(
         _supports_active_turn_redirect=True,
         redirect=lambda text: redirects.append(text) or True,
@@ -198,6 +312,7 @@ def test_different_person_cannot_redirect_or_interrupt_the_active_turn(monkeypat
                 "session_id": "sid",
                 "text": "do not steer active",
                 "_fizko_person_access_token": "incoming-person",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
             },
         )
     finally:
@@ -233,7 +348,7 @@ def test_any_token_bearing_busy_submit_queues_without_live_agent_mutation(
     session = _session(agent)
     session.update(
         running=True,
-        _active_turn_authorization=TurnAuthorization.from_raw(active_raw),
+        _active_turn_authorization=_authorization(active_raw),
         _active_turn_route="inline",
     )
     monkeypatch.setattr(srv, "_load_busy_input_mode", lambda: mode)
@@ -245,7 +360,7 @@ def test_any_token_bearing_busy_submit_queues_without_live_agent_mutation(
 
     response = srv._handle_busy_submit(
         "r", "sid", session, "wait your turn", None,
-        turn_authorization=TurnAuthorization.from_raw(incoming_raw),
+        turn_authorization=_authorization(incoming_raw),
     )
 
     assert response["result"] == {"status": "queued"}
@@ -254,7 +369,7 @@ def test_any_token_bearing_busy_submit_queues_without_live_agent_mutation(
 
 
 def test_authorization_clears_when_turn_is_cancelled_before_agent_ready(monkeypatch):
-    holder = TurnAuthorization.from_raw("cancelled-person")
+    holder = _authorization("cancelled-person")
     session = _session(types.SimpleNamespace())
     session.update(running=True, _active_turn_authorization=holder, _active_turn_route="inline")
     monkeypatch.setattr(srv, "_wait_agent_for_prompt", lambda *args: {"error": {"message": "cancelled"}})
@@ -271,7 +386,7 @@ def test_authorization_clears_when_turn_is_cancelled_before_agent_ready(monkeypa
 
 
 def test_missing_queue_authorization_never_merges_into_token_envelope():
-    holder = TurnAuthorization.from_raw("queued-person")
+    holder = _authorization("queued-person")
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = {
         "text": "personal work",
@@ -289,7 +404,7 @@ def test_missing_queue_authorization_never_merges_into_token_envelope():
 
 
 def test_queued_prompts_keep_distinct_person_authorizations(monkeypatch):
-    active = TurnAuthorization.from_raw("person-a")
+    active = _authorization("person-a")
     session = _session(types.SimpleNamespace())
     session.update(running=True, _active_turn_authorization=active)
     monkeypatch.setattr(srv, "_interrupt_busy_session", lambda *args: None)
@@ -312,6 +427,7 @@ def test_queued_prompts_keep_distinct_person_authorizations(monkeypatch):
                     "text": f"from {person}",
                     "queued": True,
                     "_fizko_person_access_token": person,
+                    "_fizko_person_access_token_expires_at": time.time() + 3600,
                 },
             )
             assert response["result"] == {"status": "queued"}
@@ -326,12 +442,12 @@ def test_queued_prompts_keep_distinct_person_authorizations(monkeypatch):
         srv._sessions.pop("sid", None)
 
     assert [text for text, _holder in dispatched] == ["from person-b", "from person-c"]
-    assert dispatched[0][1].same_credential(TurnAuthorization.from_raw("person-b"))
-    assert dispatched[1][1].same_credential(TurnAuthorization.from_raw("person-c"))
+    assert dispatched[0][1].same_credential(_authorization("person-b"))
+    assert dispatched[1][1].same_credential(_authorization("person-c"))
 
 
 def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
-    active = TurnAuthorization.from_raw("person-a")
+    active = _authorization("person-a")
     session = _session(types.SimpleNamespace())
     session.update(
         running=True,
@@ -348,6 +464,7 @@ def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
                 "text": "same words",
                 "queued": True,
                 "_fizko_person_access_token": "person-b",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
             },
         )
     finally:
@@ -358,7 +475,7 @@ def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
 
 
 def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
-    holder = TurnAuthorization.from_raw("error-person")
+    holder = _authorization("error-person")
 
     def fail(*args, **kwargs):
         assert current_fizko_authorization_header() == "Bearer error-person"
@@ -387,7 +504,7 @@ def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
 
 
 def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypatch):
-    queued = TurnAuthorization.from_raw("queued-person")
+    queued = _authorization("queued-person")
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = {
         "text": "queued work",
@@ -435,6 +552,7 @@ def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypat
                     "session_id": "sid",
                     "text": "same person correction",
                     "_fizko_person_access_token": "queued-person",
+                    "_fizko_person_access_token_expires_at": time.time() + 3600,
                 },
             ),
             name="concurrent-submit",
@@ -459,7 +577,7 @@ def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypat
 
 
 def test_failed_queued_inline_dispatch_restores_prompt_and_clears_authorization(monkeypatch):
-    holder = TurnAuthorization.from_raw("queued-person")
+    holder = _authorization("queued-person")
     queued = {"text": "try later", "transport": None, "turn_authorization": holder}
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = queued
@@ -475,7 +593,7 @@ def test_failed_queued_inline_dispatch_restores_prompt_and_clears_authorization(
 
 
 def test_failed_run_prompt_admission_clears_authorization_and_route(monkeypatch):
-    holder = TurnAuthorization.from_raw("refused-person")
+    holder = _authorization("refused-person")
     session = _session(types.SimpleNamespace())
     session.update(running=True, _active_turn_authorization=holder, _active_turn_route="inline")
     monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: RuntimeError("owned elsewhere"))
@@ -491,7 +609,7 @@ def test_failed_run_prompt_admission_clears_authorization_and_route(monkeypatch)
 
 
 def test_interrupt_clears_active_authorization_and_uses_forced_inline_route(monkeypatch):
-    holder = TurnAuthorization.from_raw("active-person")
+    holder = _authorization("active-person")
     interrupted = []
     compute_interrupts = []
     agent = types.SimpleNamespace(interrupt=lambda: interrupted.append(True))
@@ -519,7 +637,7 @@ def test_interrupt_clears_active_authorization_and_uses_forced_inline_route(monk
 
 
 def test_reset_clears_active_authorization_and_route(monkeypatch):
-    holder = TurnAuthorization.from_raw("active-person")
+    holder = _authorization("active-person")
     new_agent = types.SimpleNamespace()
     session = _session(types.SimpleNamespace())
     session.update(_active_turn_authorization=holder, _active_turn_route="inline")
@@ -549,7 +667,7 @@ def _install_token_bearing_direct_rpc_session(monkeypatch):
     session = _session(agent)
     session.update(
         running=True,
-        _active_turn_authorization=TurnAuthorization.from_raw("active-person"),
+        _active_turn_authorization=_authorization("active-person"),
         _active_turn_route="inline",
         _run_thread=None,
     )
@@ -603,6 +721,7 @@ def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypa
             {
                 "session_id": "sid",
                 "_fizko_person_access_token": "active-person",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
             },
         )
     finally:
@@ -614,6 +733,53 @@ def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypa
     assert "_active_turn_authorization" not in session
 
 
+def test_interrupt_keeps_personal_fence_until_live_worker_settles(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_run_thread"] = types.SimpleNamespace(is_alive=lambda: True)
+    holder = session["_active_turn_authorization"]
+    try:
+        response = srv._methods["session.interrupt"](
+            "r",
+            {
+                "session_id": "sid",
+                "_fizko_person_access_token": "active-person",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
+            },
+        )
+        assert response["result"]["status"] == "interrupted"
+        assert session["running"] is True
+        assert session["_active_turn_authorization"] is holder
+        assert srv._direct_personal_turn_mutation_error("next", session)["error"]["code"] == 4125
+
+        with session["history_lock"]:
+            session["running"] = False
+            assert srv._clear_active_turn_state(session, holder)
+        assert "_active_turn_authorization" not in session
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert calls["interrupt"] == [True]
+
+
+def test_expired_person_authorization_cannot_interrupt(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    try:
+        response = srv._methods["session.interrupt"](
+            "r",
+            {
+                "session_id": "sid",
+                "_fizko_person_access_token": "active-person",
+                "_fizko_person_access_token_expires_at": time.time() - 1,
+            },
+        )
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["error"]["code"] == 4125
+    assert calls["interrupt"] == []
+    assert session["running"] is True
+
+
 def test_direct_session_interrupt_rejects_different_person_authorization(monkeypatch):
     session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
     try:
@@ -622,6 +788,7 @@ def test_direct_session_interrupt_rejects_different_person_authorization(monkeyp
             {
                 "session_id": "sid",
                 "_fizko_person_access_token": "different-person",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
             },
         )
     finally:

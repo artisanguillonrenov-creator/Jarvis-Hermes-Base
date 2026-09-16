@@ -2131,6 +2131,8 @@ export interface PromptSubmitParams {
   confirm_truncate?: boolean | null
   confirm_empty_truncate?: boolean | null
   rebind_survivor_row_ids?: number[] | null
+  _fizko_person_access_token?: string | null
+  _fizko_person_access_token_expires_at?: number | null
 }
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
@@ -2866,6 +2868,8 @@ export interface SessionInterruptParams {
   session_id: string
   profile?: string | null
   expected_hosted_task_id?: string | null
+  _fizko_person_access_token?: string | null
+  _fizko_person_access_token_expires_at?: number | null
 }
 export interface SessionInterruptResult {
   status: InterruptStatus
@@ -4452,7 +4456,7 @@ export interface RpcMethods {
   'prompt.background': { params: SideAgentParams; result: TaskIdResult }
   /** Side question over a snapshot of the live conversation; the answer arrives as btw.complete. */
   'prompt.btw': { params: SideAgentParams; result: TaskIdResult }
-  /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. */
+  /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide both per-turn bearer and Unix expiry metadata. */
   'prompt.submit': { params: PromptSubmitParams; result: PromptSubmitResult }
   /** Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new. */
   'reload.env': { params: ReloadEnvParams; result: ReloadEnvResult }
@@ -4500,7 +4504,7 @@ export interface RpcMethods {
   'session.foreign.preview': { params: SessionForeignIdParams; result: SessionForeignPreviewResult }
   /** The durable display transcript (ancestors included, row ids attached). */
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult }
-  /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. */
+  /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. A personal turn requires its matching, unexpired per-turn bearer and expiry metadata. */
   'session.interrupt': { params: SessionInterruptParams; result: SessionInterruptResult }
   /** Human-facing stored sessions, most recent first (sub-agent / kanban sources denied). */
   'session.list': { params: SessionListParams; result: SessionListResult }

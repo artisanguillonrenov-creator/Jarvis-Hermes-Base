@@ -596,6 +596,8 @@ def _(rid, params: dict) -> dict:
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
+    if turn_authorization.has_token and turn_authorization.is_expired:
+        return _err(rid, 4004, "person token is expired")
 
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")

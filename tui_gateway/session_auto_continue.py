@@ -5,6 +5,7 @@ busy-submit handling. Bodies are rebound onto server.py's globals at install tim
 from __future__ import annotations
 
 import contextlib
+import threading
 
 from .method_ctx import bind_module
 
@@ -111,7 +112,21 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         try:
             _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
             _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
+            from agent.turn_authorization import TurnAuthorization
+
+            recovery_authorization = (
+                TurnAuthorization.blocked()
+                if marker.get("personal_authorization_blocked")
+                else None
+            )
+            submit_kwargs = {
+                "display_kind": "auto_continue",
+                **(
+                    {"turn_authorization": recovery_authorization}
+                    if recovery_authorization is not None else {}
+                ),
+            }
+            _run_prompt_submit(rid, sid, session, text, **submit_kwargs)
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications
@@ -129,9 +144,9 @@ def _same_as_active_turn_authorization(session: dict, authorization) -> bool:
     """Treat legacy/no-token holders alike; compare personal credentials in constant time."""
     active = session.get("_active_turn_authorization")
     if authorization is None:
-        return active is None or not active.has_token
+        return active is None or not active.is_personal
     if active is None:
-        return not authorization.has_token
+        return not authorization.is_personal
     return authorization.same_credential(active)
 
 
@@ -184,7 +199,7 @@ def _enqueue_prompt(
         "transport": transport,
         **({"image_paths": image_paths} if image_paths else {}),
         **({"turn_author": turn_author} if turn_author else {}),
-        **({"turn_authorization": authorization} if authorization.has_token else {}),
+        **({"turn_authorization": authorization} if authorization.is_personal else {}),
     }
     existing = session.get("queued_prompt")
     existing_authorization = existing.get("turn_authorization") if existing else None
@@ -217,13 +232,13 @@ def _sanitize_queued_entry_vs_inflight_user(
         return None
     entry_authorization = entry.get("turn_authorization")
     same_authorization = (
-        (active_authorization is None and not entry_authorization.has_token)
+        (active_authorization is None and not entry_authorization.is_personal)
         or (
             active_authorization is not None
             and entry_authorization.same_credential(active_authorization)
         )
     ) if entry_authorization is not None else (
-        active_authorization is None or not active_authorization.has_token
+        active_authorization is None or not active_authorization.is_personal
     )
     if not same_authorization:
         return entry
@@ -318,8 +333,8 @@ def _handle_busy_submit(
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
         active_authorization = session.get("_active_turn_authorization")
     if (
-        bool(getattr(active_authorization, "has_token", False))
-        or bool(getattr(turn_authorization, "has_token", False))
+        bool(getattr(active_authorization, "is_personal", False))
+        or bool(getattr(turn_authorization, "is_personal", False))
     ):
         # Personal authorization is scoped to one admitted turn. Even the same
         # credential waits for a fresh authenticated turn rather than touching
@@ -360,59 +375,68 @@ def _handle_busy_submit(
 
 
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
-    """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
-    skips lower-priority follow-ups this cycle (the user's message wins)."""
+    """Fire the first runnable queued prompt. Invalid personal heads are rejected and
+    draining continues in the same cycle, bounded so a poisoned queue cannot monopolize a worker."""
     from agent.turn_authorization import TurnAuthorization
 
+    rejected_messages = []
+    queued = None
+    turn_authorization = None
+    use_compute_host = False
+    queue_generation = 0
+    rejected_batch_has_more = False
     with session["history_lock"]:
-        if session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
+        if session.get("_closing") or session.get("running"):
             return False
-        queue_generation = int(session.get("_queued_prompt_generation", 0))
-        _ac_set_queue(session, session.get("queued_prompts") or [])
-        turn_authorization = queued.get("turn_authorization") or TurnAuthorization.from_raw(None)
-        compute_host_required = _session_uses_compute_host(session)
-        if turn_authorization.has_token and turn_authorization.is_expired:
-            session["last_active"] = time.time()
-            reject_expired_personal = True
-            reject_personal_compute = False
-            use_compute_host = False
-        elif turn_authorization.has_token and compute_host_required:
-            # A queued personal turn may outlive a config change.  Never bypass a
-            # newly-enabled process-isolation boundary to drain it inline.
-            session["last_active"] = time.time()
-            reject_expired_personal = False
-            reject_personal_compute = True
-            use_compute_host = False
-        else:
-            reject_expired_personal = False
-            reject_personal_compute = False
+        for _ in range(32):
+            queued = session.get("queued_prompt")
+            if not queued:
+                break
+            queue_generation = int(session.get("_queued_prompt_generation", 0))
+            _ac_set_queue(session, session.get("queued_prompts") or [])
+            turn_authorization = queued.get("turn_authorization") or TurnAuthorization.from_raw(None)
+            compute_host_required = _session_uses_compute_host(session)
+            if turn_authorization.has_token and turn_authorization.is_expired:
+                rejected_messages.append(
+                    "person authorization expired before the queued turn ran"
+                )
+                queued = None
+                session["last_active"] = time.time()
+                continue
+            if turn_authorization.is_personal and compute_host_required:
+                rejected_messages.append(
+                    "person-authorized turns are unavailable while turn isolation is enabled"
+                )
+                queued = None
+                session["last_active"] = time.time()
+                continue
             use_compute_host = compute_host_required
-        if reject_expired_personal or reject_personal_compute:
-            session["running"] = False
-            _clear_active_turn_state(session, turn_authorization)
-        else:
             session["running"] = True
             session["_active_turn_route"] = "compute" if use_compute_host else "inline"
             session["_active_turn_authorization"] = turn_authorization
-        queued_transport = queued.get("transport")
-        # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
-        # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
-        # whole drained turn. A peer that disconnected while its prompt sat in the queue is skipped: the
-        # prompt still runs, only the dead pin is dropped.
-        if (
-            not (reject_expired_personal or reject_personal_compute)
-            and queued_transport is not None
-            and not _transport_is_dead(queued_transport)
-        ):
-            _attach_session_transport(session, queued_transport)
-    if reject_expired_personal:
-        _emit("error", sid, {"message": "person authorization expired before the queued turn ran"})
-        return True
-    if reject_personal_compute:
-        _emit("error", sid, {
-            "message": "person-authorized turns are unavailable while turn isolation is enabled"
-        })
-        return True
+            queued_transport = queued.get("transport")
+            # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
+            # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
+            # whole drained turn. A peer that disconnected while its prompt sat in the queue is skipped: the
+            # prompt still runs, only the dead pin is dropped.
+            if (
+                queued_transport is not None
+                and not _transport_is_dead(queued_transport)
+            ):
+                _attach_session_transport(session, queued_transport)
+            break
+        else:
+            rejected_batch_has_more = bool(session.get("queued_prompt"))
+    for message in rejected_messages:
+        _emit("error", sid, {"message": message})
+    if queued is None:
+        if rejected_batch_has_more:
+            threading.Thread(
+                target=_drain_queued_prompt,
+                args=(rid, sid, session),
+                daemon=True,
+            ).start()
+        return bool(rejected_messages)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
             # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
@@ -432,7 +456,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     restore_claim = False
     try:
         if not use_compute_host:
-            if turn_authorization.has_token:
+            if turn_authorization.is_personal:
                 kwargs["turn_authorization"] = turn_authorization
             if _run_prompt_submit(
                 rid, sid, session, queued["text"], **kwargs, **author_kwargs

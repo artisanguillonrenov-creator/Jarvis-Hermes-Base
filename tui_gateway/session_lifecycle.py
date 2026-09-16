@@ -433,10 +433,11 @@ def _interrupt_session_turn(
     with session["history_lock"]:
         if reject_person_authorized:
             authorization = session.get("_active_turn_authorization")
-            if session.get("running") and authorization is not None and authorization.has_token:
+            if session.get("running") and authorization is not None and authorization.is_personal:
                 if (
                     expected_person_authorization is None
                     or not expected_person_authorization.has_token
+                    or expected_person_authorization.is_expired
                     or not authorization.same_credential(expected_person_authorization)
                 ):
                     return None
@@ -445,7 +446,8 @@ def _interrupt_session_turn(
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
-        _clear_active_turn_state(session)
+        if not should_interrupt:
+            _clear_active_turn_state(session)
     run_thread_alive = False
     if use_compute_host:
         # The host owns the live turn (parent `running` can lag a blocked tool), so let it decide. Gate on
@@ -475,6 +477,7 @@ def _interrupt_session_turn(
                 if session.get("running"):
                     session["running"] = False
                     _clear_inflight_turn(session)
+                    _clear_active_turn_state(session)
     _clear_pending(sid)
     with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval

@@ -2492,7 +2492,7 @@
     },
     {
       "name": "prompt.submit",
-      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing.",
+      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide both per-turn bearer and Unix expiry metadata.",
       "params": [
         {
           "name": "params",
@@ -2924,7 +2924,7 @@
     },
     {
       "name": "session.interrupt",
-      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker.",
+      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker. A personal turn requires its matching, unexpired per-turn bearer and expiry metadata.",
       "params": [
         {
           "name": "params",
@@ -21898,6 +21898,32 @@
             ],
             "default": null,
             "title": "Rebind Survivor Row Ids"
+          },
+          "_fizko_person_access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted per-person bearer for this turn only. Requires _fizko_person_access_token_expires_at and is never persisted.",
+            "title": "Fizko Person Access Token"
+          },
+          "_fizko_person_access_token_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Unix expiry timestamp for the per-person bearer; required when the bearer is present.",
+            "title": "Fizko Person Access Token Expires At"
           }
         },
         "required": [
@@ -25807,6 +25833,32 @@
             ],
             "default": null,
             "title": "Expected Hosted Task Id"
+          },
+          "_fizko_person_access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted per-person bearer matching the active personal turn.",
+            "title": "Fizko Person Access Token"
+          },
+          "_fizko_person_access_token_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Unix expiry timestamp; required and must still be valid for a personal interrupt.",
+            "title": "Fizko Person Access Token Expires At"
           }
         },
         "required": [

@@ -178,7 +178,7 @@ def test_real_background_delegate_task_drops_parent_turn_authorization(monkeypat
         session_history_delivery="1",
         async_delivery=False,
     )
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("parent-person"))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw("parent-person", expires_at=time.time() + 3600))
     try:
         out = dt.delegate_task(
             goal="detached authority boundary",
@@ -194,6 +194,47 @@ def test_real_background_delegate_task_drops_parent_turn_authorization(monkeypat
         reset_current_turn_authorization(token)
 
     assert seen == [""]
+
+
+def test_async_delegation_record_context_retains_only_blocked_personal_marker(monkeypatch):
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        current_fizko_authorization_state,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+    from tools import async_delegation
+
+    submitted = []
+
+    class _Executor:
+        def submit(self, fn):
+            submitted.append(fn)
+
+    monkeypatch.setattr(async_delegation, "_persist_dispatch", lambda _record: None)
+    monkeypatch.setattr(async_delegation, "_get_executor", lambda _workers: _Executor())
+    async_delegation._records.clear()
+
+    token = set_current_turn_authorization(
+        TurnAuthorization.from_raw("record-secret", expires_at=time.time() + 3600)
+    )
+    try:
+        handle = async_delegation.dispatch_async_delegation(
+            goal="inspect record context",
+            context=None,
+            toolsets=None,
+            role="worker",
+            model=None,
+            session_key="session",
+            runner=lambda: {"status": "completed"},
+        )
+        record = async_delegation._records[handle["delegation_id"]]
+        assert record["_context"].run(current_fizko_authorization_state) == (True, "")
+    finally:
+        reset_current_turn_authorization(token)
+        async_delegation._records.clear()
+
+    assert len(submitted) == 1
 
 
 # ---------------------------------------------------------------------------

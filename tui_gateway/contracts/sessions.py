@@ -514,6 +514,16 @@ method("session.compress", params=SessionCompressParams, result=SessionCompressR
 
 class SessionInterruptParams(SessionParams):
     expected_hosted_task_id: str | None = None  # only interrupt if this hosted task is the running one
+    fizko_person_access_token: str | None = Field(
+        default=None,
+        alias="_fizko_person_access_token",
+        description="Trusted per-person bearer matching the active personal turn.",
+    )
+    fizko_person_access_token_expires_at: float | None = Field(
+        default=None,
+        alias="_fizko_person_access_token_expires_at",
+        description="Unix expiry timestamp; required and must still be valid for a personal interrupt.",
+    )
 
 
 class InterruptStatus(WireEnum):
@@ -528,7 +538,8 @@ class SessionInterruptResult(Result):
 
 
 method("session.interrupt", params=SessionInterruptParams, result=SessionInterruptResult,
-       doc="Stop the running turn (and streaming TTS); retires the crash-recovery marker.")
+       doc=("Stop the running turn (and streaming TTS); retires the crash-recovery marker. "
+            "A personal turn requires its matching, unexpired per-turn bearer and expiry metadata."))
 
 
 class CorrectionStatus(WireEnum):

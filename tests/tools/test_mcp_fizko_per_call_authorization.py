@@ -5,6 +5,7 @@ import contextvars
 import importlib.metadata
 import json
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -150,7 +151,7 @@ def test_mcp_handler_captures_person_header_before_crossing_to_mcp_loop(monkeypa
 
     import contextvars
 
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token"))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600))
     try:
         result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
     finally:
@@ -218,6 +219,79 @@ def test_expired_person_token_blocks_instead_of_falling_back_to_profile_authoriz
     assert "person authorization expired" in json.loads(result)["error"]
 
 
+def test_blocked_personal_descendant_does_not_fall_back_to_profile_authorization(monkeypatch):
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+    from tools import mcp_tool_handlers
+
+    server = _stub_handler_server({
+        "url": "https://mcp.fizko.ai/mcp",
+        "per_call_authorization": "fizko_person_access_token",
+    })
+    monkeypatch.setattr(mcp_tool_handlers, "_acquire_call_server", lambda *a: (server, None))
+    monkeypatch.setattr(
+        mcp_tool_handlers,
+        "_call_tool_racing_stdio_death",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blocked descendant reached the MCP transport")
+        ),
+    )
+
+    context_token = set_current_turn_authorization(TurnAuthorization.blocked())
+    try:
+        result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
+    finally:
+        reset_current_turn_authorization(context_token)
+
+    assert "person authorization unavailable" in json.loads(result)["error"]
+
+
+def test_person_token_is_revalidated_immediately_before_transport_dispatch(monkeypatch):
+    from agent import turn_authorization
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+    from tools import mcp_tool_handlers
+
+    now = [100.0]
+    calls = []
+
+    async def fake_racing(*_args, **_kwargs):
+        calls.append(True)
+        return SimpleNamespace(content=[SimpleNamespace(text="ok")], is_error=False, structured_content=None)
+
+    def delayed_dispatch(_name, _server, _op, call, _timeout, _handlers, _failure, **_kwargs):
+        now[0] = 102.0
+        try:
+            return asyncio.run(call())
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+    server = _stub_handler_server({
+        "url": "https://mcp.fizko.ai/mcp",
+        "per_call_authorization": "fizko_person_access_token",
+    })
+    monkeypatch.setattr(turn_authorization.time, "time", lambda: now[0])
+    monkeypatch.setattr(mcp_tool_handlers, "_acquire_call_server", lambda *a: (server, None))
+    monkeypatch.setattr(mcp_tool_handlers, "_call_tool_racing_stdio_death", fake_racing)
+    monkeypatch.setattr(mcp_tool_handlers, "_dispatch", delayed_dispatch)
+    token = set_current_turn_authorization(
+        TurnAuthorization.from_raw("short-lived", expires_at=101.0)
+    )
+    try:
+        result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
+    finally:
+        reset_current_turn_authorization(token)
+
+    assert calls == []
+    assert "expired" in json.loads(result)["error"]
+
+
 def test_neighbor_mcp_is_not_given_per_call_headers(monkeypatch):
     from agent.turn_authorization import TurnAuthorization, reset_current_turn_authorization, set_current_turn_authorization
     from tools import mcp_tool_handlers
@@ -236,7 +310,7 @@ def test_neighbor_mcp_is_not_given_per_call_headers(monkeypatch):
         "_run_on_mcp_loop",
         lambda call, timeout: asyncio.run(contextvars.Context().run(call)),
     )
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token"))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600))
     try:
         mcp_tool_handlers._make_tool_handler("neighbor", "ping", 10)({})
     finally:
@@ -297,7 +371,7 @@ def test_concurrent_handlers_keep_person_headers_isolated(monkeypatch):
     handler = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)
 
     def invoke(person):
-        token = set_current_turn_authorization(TurnAuthorization.from_raw(person))
+        token = set_current_turn_authorization(TurnAuthorization.from_raw(person, expires_at=time.time() + 3600))
         try:
             handler({})
         finally:
@@ -312,15 +386,18 @@ def test_concurrent_handlers_keep_person_headers_isolated(monkeypatch):
     assert sorted(recorded) == ["Bearer person-a", "Bearer person-b"]
 
 
-def test_retry_reuses_the_same_local_person_headers(monkeypatch):
+def test_retry_revalidates_the_same_local_person_authorization(monkeypatch):
+    from agent import turn_authorization
     from agent.turn_authorization import TurnAuthorization, reset_current_turn_authorization, set_current_turn_authorization
     from tools import mcp_tool_handlers
 
     recorded = []
+    now = [100.0]
 
     async def fake_racing(server, server_name, tool_name, args, request_headers=None):
         recorded.append(dict(request_headers))
         if len(recorded) == 1:
+            now[0] = 102.0
             raise RuntimeError("session expired")
         return SimpleNamespace(content=[SimpleNamespace(text="ok")], is_error=False, structured_content=None)
 
@@ -328,9 +405,14 @@ def test_retry_reuses_the_same_local_person_headers(monkeypatch):
         try:
             asyncio.run(call())
         except RuntimeError:
-            ambient = set_current_turn_authorization(TurnAuthorization.from_raw("changed-ambient"))
+            ambient = set_current_turn_authorization(
+                TurnAuthorization.from_raw("changed-ambient", expires_at=200.0)
+            )
             try:
-                return asyncio.run(call())
+                try:
+                    return asyncio.run(call())
+                except Exception as exc:
+                    return json.dumps({"error": str(exc)})
             finally:
                 reset_current_turn_authorization(ambient)
 
@@ -338,16 +420,17 @@ def test_retry_reuses_the_same_local_person_headers(monkeypatch):
         "url": "https://mcp.fizko.ai/mcp",
         "per_call_authorization": "fizko_person_access_token",
     })
+    monkeypatch.setattr(turn_authorization.time, "time", lambda: now[0])
     monkeypatch.setattr(mcp_tool_handlers, "_acquire_call_server", lambda *a: (server, None))
     monkeypatch.setattr(mcp_tool_handlers, "_call_tool_racing_stdio_death", fake_racing)
     monkeypatch.setattr(mcp_tool_handlers, "_dispatch", retry_dispatch)
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("original-person"))
+    token = set_current_turn_authorization(
+        TurnAuthorization.from_raw("original-person", expires_at=101.0)
+    )
     try:
-        mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
+        result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
     finally:
         reset_current_turn_authorization(token)
 
-    assert recorded == [
-        {"Authorization": "Bearer original-person"},
-        {"Authorization": "Bearer original-person"},
-    ]
+    assert recorded == [{"Authorization": "Bearer original-person"}]
+    assert "expired" in json.loads(result)["error"]

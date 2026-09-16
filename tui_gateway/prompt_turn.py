@@ -163,7 +163,9 @@ def _admit_prompt_turn(
     return images, agent
 
 
-def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True) -> str:
+def _record_turn_marker(
+    session: dict, text: Any, *, auto_continue: bool = True, turn_authorization=None
+) -> str:
     """Write the durable crash marker; returns the session key it was written under (compression
     can rotate session_key mid-turn).  A surviving marker means the process died mid-turn.
     The key is published before the disk write so an interrupt racing startup can retire
@@ -175,8 +177,13 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True)
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
-        record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue)
+        record_turn_start(
+            marker_home, marker_key, marker_text, attempts=marker_attempt,
+            auto_continue=auto_continue,
+            personal_authorization_blocked=bool(
+                getattr(turn_authorization, "is_personal", False)
+            ),
+        )
         with session["history_lock"]:
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
         if marker_cancelled:
@@ -402,12 +409,14 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
-                            on_done=None, on_error=None) -> None:
+                            on_done=None, on_error=None, turn_authorization=None) -> None:
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
     release ``running``."""
     try:
         _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, prompt)
+        _run_prompt_submit(
+            rid, sid, session, prompt, turn_authorization=turn_authorization
+        )
         if on_done is not None:
             on_done()
     except Exception as exc:
@@ -419,7 +428,9 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 
 def _run_post_turn_followups(
-    rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
+    rid, sid: str, session: dict, result: Any, goal_followup: str | None,
+    *, descendant_authorization=None,
+) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
@@ -427,7 +438,10 @@ def _run_post_turn_followups(
     steer = result.get("pending_steer") if isinstance(result, dict) else None
     if isinstance(steer, str) and steer.strip():
         with session["history_lock"]:
-            _enqueue_prompt(session, steer, session.get("transport"))
+            _enqueue_prompt(
+                session, steer, session.get("transport"),
+                turn_authorization=descendant_authorization,
+            )
     if _drain_queued_prompt(rid, sid, session):
         return
     if goal_followup:
@@ -435,7 +449,10 @@ def _run_post_turn_followups(
             if session.get("running"):
                 return  # user already sent something — their turn wins
             session["running"] = True
-        _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
+        _dispatch_followup_turn(
+            rid, sid, session, goal_followup, "goal continuation dispatch",
+            turn_authorization=descendant_authorization,
+        )
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
@@ -907,7 +924,10 @@ def _run_prompt_submit(
         st = _TurnRun(
             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
             receipt_committed=terminal_callback is None)
-        st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None)
+        st.marker_key = _record_turn_marker(
+            session, text, auto_continue=terminal_callback is None,
+            turn_authorization=authorization,
+        )
         goal_followup = None
         authorization_token = set_current_turn_authorization(authorization)
         try:
@@ -973,7 +993,20 @@ def _run_prompt_submit(
                     session.pop("_hosted_room_task", None)
             session.pop("_auto_continue_scheduled", None)
             _emit_settled_session_info(sid, session, st.agent)
-        _run_post_turn_followups(rid, sid, session, st.result, goal_followup)
+        descendant_authorization = (
+            TurnAuthorization.blocked() if authorization.is_personal else None
+        )
+        if descendant_authorization is None:
+            _run_post_turn_followups(rid, sid, session, st.result, goal_followup)
+        else:
+            descendant_token = set_current_turn_authorization(descendant_authorization)
+            try:
+                _run_post_turn_followups(
+                    rid, sid, session, st.result, goal_followup,
+                    descendant_authorization=descendant_authorization,
+                )
+            finally:
+                reset_current_turn_authorization(descendant_token)
     run_thread = threading.Thread(target=run, daemon=True)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.

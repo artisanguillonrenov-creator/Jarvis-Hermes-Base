@@ -2019,7 +2019,7 @@ def _active_turn_has_person_authorization(session: dict) -> bool:
     return bool(
         session.get("running")
         and authorization is not None
-        and authorization.has_token
+        and authorization.is_personal
     )
 
 
