@@ -23,7 +23,12 @@ from hermes_cli.update_cmd_common import _best_effort
 logger = logging.getLogger("hermes_cli.update_cmd")
 
 
-_UPDATE_RUNTIME_RELOAD_MODULES = "hermes_constants", "tools.environments.local", "tools.lazy_deps"
+#: Reloaded in place after the pull, before later phases import newly-pulled source. ``utils`` is
+#: the shared surface nearly every pulled module does ``from utils import <name>`` against: the
+#: updater holds its PRE-pull module object, so a pull that ADDS a name there (field cases:
+#: ``base_url_origin``, then ``file_signature`` / ``read_json_or_empty``) makes every late import of
+#: the new source die with ImportError — silently, since those steps warn-and-continue (#112558).
+_UPDATE_RUNTIME_RELOAD_MODULES = "utils", "hermes_constants", "tools.environments.local", "tools.lazy_deps"
 
 #: Modules EXECUTING the update survive the purge: evicting them buys nothing (running frames
 #: keep them alive) and reloading them mid-flight is the one genuinely unsafe move.

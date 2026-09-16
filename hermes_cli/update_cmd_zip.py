@@ -350,6 +350,10 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
         _ensure_venv_pip(pip_cmd, _m().sys.executable)
         _m()._install_python_dependencies_with_optional_fallback(pip_cmd)
         install_prefix, install_env = pip_cmd, None
+    # Parity with the git-pull path (its post-swap contract): this process still holds the
+    # PRE-swap module objects, and the refresh below late-imports freshly-extracted source that
+    # may need names this very archive added — reload them before the first new import (#112558).
+    _m()._reload_updated_runtime_modules()
     _m()._restore_active_tool_dependencies(active_tool_dependencies, install_prefix, env=install_env)
     # Parity with git-pull path: heal the active memory provider's bridge packages after the reinstall.
     _m()._refresh_active_memory_provider_dependencies()
@@ -428,7 +432,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # Don't stop a working dashboard when the Node refresh failed — see the git-update path for rationale.
     # See #30271.
     _finish_dashboard_update_cleanup(node_failures)
-    with _best_effort('Update receipt finalize (zip path) failed: %s'):
+    with _best_effort('Update receipt finalize (zip path) failed: %s', logging.WARNING):
         from hermes_cli.update_receipt import finalize_update_receipt
         finalize_update_receipt("success" if update_complete and not node_failures else "partial")
     return update_complete
