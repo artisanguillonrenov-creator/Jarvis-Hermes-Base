@@ -847,9 +847,6 @@ def _extract_pricing(payload: Dict[str, Any]) -> Dict[str, Any]:
                     break
         if pricing:
             return _normalize_token_rates(pricing, normalized.get("unit"))
-            if "unit" in normalized:
-                pricing["unit"] = normalized["unit"]
-            return pricing
     return {}
 
 

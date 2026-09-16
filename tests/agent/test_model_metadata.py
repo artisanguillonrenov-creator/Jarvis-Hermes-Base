@@ -2008,6 +2008,7 @@ def test_endpoint_pricing_already_per_million_is_not_inflated():
     dollars_per_million = {
         mid: up._pricing_entry_from_metadata(meta, mid, source_url="x", pricing_version="openai-compatible-models-api")
         for mid in catalog
+    }
     assert float(dollars_per_million["minimax-m3"].input_cost_per_million) == pytest.approx(0.6)
     assert float(dollars_per_million["minimax-m3"].cache_read_cost_per_million) == pytest.approx(0.12)
     assert float(dollars_per_million["glm-x"].output_cost_per_million) == pytest.approx(2.0)
@@ -2016,6 +2017,8 @@ def test_endpoint_pricing_already_per_million_is_not_inflated():
 
 def test_endpoint_pricing_per_token_quotes_pass_through_unchanged():
     """Control: per-token quotes (the OpenRouter convention) and per-request fees are left alone."""
+    from agent import model_metadata as mm
+    from agent import usage_pricing as up
 
     model = {"id": "m", "pricing": {"prompt": "0.0000006", "completion": "0.0000012", "request": "0.005"}}
     meta = {"m": mm._endpoint_model_entry(model, "m", None)}
@@ -2023,13 +2026,14 @@ def test_endpoint_pricing_per_token_quotes_pass_through_unchanged():
     assert float(entry.input_cost_per_million) == pytest.approx(0.6)
     assert float(entry.output_cost_per_million) == pytest.approx(1.2)
     assert float(entry.request_cost) == pytest.approx(0.005)
-def test_extract_pricing_preserves_per_1m_tokens_unit():
-    """Generic /models pricing must keep ``unit`` and leave prompt/completion
-    as advertised — do not pre-divide per-million values (#107989)."""
+
+
+def test_extract_pricing_normalizes_per_1m_tokens_unit():
+    """Generic /models pricing with ``unit=per_1m_tokens`` is rescaled to per-token (#107989 / #112018)."""
     pricing = _extract_pricing({
         "id": "x",
         "pricing": {"prompt": "2.90", "completion": "10.00", "unit": "per_1m_tokens"},
     })
-    assert pricing["unit"] == "per_1m_tokens"
-    assert pricing["prompt"] == "2.90"
-    assert pricing["completion"] == "10.00"
+    assert "unit" not in pricing
+    assert float(pricing["prompt"]) == pytest.approx(2.90 / 1_000_000)
+    assert float(pricing["completion"]) == pytest.approx(10.00 / 1_000_000)
