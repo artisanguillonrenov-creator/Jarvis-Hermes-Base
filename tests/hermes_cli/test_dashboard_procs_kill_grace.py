@@ -9,6 +9,7 @@ start aborts with ``DeletedWalGenerationError``. Real child processes, real sign
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -19,7 +20,10 @@ import pytest
 
 from hermes_cli import dashboard_procs
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics only")
+pytestmark = [
+    pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics only"),
+    pytest.mark.live_system_guard_bypass,
+]
 
 # Mirrors the lifespan: sleep for the teardown budget on SIGTERM, then leave a marker and exit 0.
 _GRACEFUL_CHILD = textwrap.dedent(
@@ -41,6 +45,27 @@ _IGNORING_CHILD = textwrap.dedent(
     import pathlib, signal, sys, time
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     pathlib.Path(sys.argv[1]).write_text("ready")
+    time.sleep(300)
+    """
+)
+
+_WEDGED_DESCENDANT = textwrap.dedent(
+    """
+    import os, pathlib, signal, sys, time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+    time.sleep(300)
+    """
+)
+
+_WEDGED_DESCENDANT_PARENT = textwrap.dedent(
+    f"""
+    import pathlib, signal, subprocess, sys, time
+    pid_path, ready = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+    child = subprocess.Popen([sys.executable, "-c", {_WEDGED_DESCENDANT!r}, str(pid_path)])
+    while not pid_path.exists():
+        time.sleep(0.01)
+    ready.write_text("ready")
     time.sleep(300)
     """
 )
@@ -74,6 +99,17 @@ def _kill_and_reap(child: subprocess.Popen):
     return killed, failed
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    return bool(status) and not status.startswith("Z")
+
+
 def test_teardown_as_long_as_lifespan_budget_exits_gracefully(tmp_path):
     """A teardown spanning the 5s hosted-room stop + 1s join must not be SIGKILLed."""
     marker, ready = tmp_path / "marker", tmp_path / "ready"
@@ -98,3 +134,21 @@ def test_sigterm_ignoring_process_is_still_sigkilled(tmp_path, monkeypatch):
     assert failed == []
     assert child.returncode == -signal.SIGKILL
     assert killed == [child.pid]
+
+
+def test_wedged_descendant_is_killed_after_its_backend_exits(tmp_path, monkeypatch):
+    """A descendant must stay targeted after SIGTERM reparented it away from the backend."""
+    monkeypatch.setattr(dashboard_procs, "_POSIX_TERM_GRACE_SECONDS", 0.6)
+    pid_path, ready = tmp_path / "descendant.pid", tmp_path / "ready"
+    backend = _spawn_ready(_WEDGED_DESCENDANT_PARENT, ready, str(pid_path), str(ready))
+    descendant_pid = int(pid_path.read_text())
+
+    try:
+        killed, failed = _kill_and_reap(backend)
+
+        assert failed == []
+        assert killed == [backend.pid]
+        assert not _pid_alive(descendant_pid), "wedged descendant survived backend shutdown"
+    finally:
+        if _pid_alive(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)

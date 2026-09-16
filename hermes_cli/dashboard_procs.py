@@ -288,31 +288,91 @@ def _kill_pids_windows(pids: list[int], killed: list[int], failed: list[tuple[in
 _POSIX_TERM_GRACE_SECONDS = 10.0
 
 
+def _process_start_marker(pid: int) -> str | None:
+    """Best-effort POSIX process incarnation marker, or ``None`` if it cannot be read."""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], timeout=5, **_PS_RUN_KWARGS)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    marker = result.stdout.strip() if result.returncode == 0 else ""
+    return marker or None
+
+
+def _snapshot_posix_descendants(pids: list[int]) -> dict[int, str]:
+    """Snapshot descendants before their parent can exit, keyed by PID and start time.
+
+    The marker prevents a later recycled PID from being signaled. A failed scan contributes no
+    descendants and leaves the historical root-PID shutdown behavior intact.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,lstart="], timeout=10, **_PS_RUN_KWARGS)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid, ppid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        if marker := _process_start_marker(pid):
+            children.setdefault(ppid, []).append((pid, marker))
+    descendants: dict[int, str] = {}
+    pending = list(dict.fromkeys(pids))
+    while pending:
+        parent = pending.pop()
+        for child, marker in children.get(parent, []):
+            if child not in descendants and child not in pids:
+                descendants[child] = marker
+                pending.append(child)
+    return descendants
+
+
 def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int, str]]) -> None:
-    """SIGTERM, wait up to ``_POSIX_TERM_GRACE_SECONDS`` for graceful exit, SIGKILL survivors."""
+    """Terminate the initial process trees within the existing bounded grace period."""
     import signal as _signal
     import time as _time
 
     from gateway.status import _pid_exists
 
+    roots = set(pids)
+    descendants = _snapshot_posix_descendants(pids)
+    targets = list(dict.fromkeys([*pids, *descendants]))
+
+    def _mark_killed(pid: int) -> None:
+        if pid in roots and pid not in killed:
+            killed.append(pid)
+
     def _send(pid: int, sig) -> None:
+        expected_marker = descendants.get(pid)
+        if expected_marker is not None and _process_start_marker(pid) != expected_marker:
+            failed.append((pid, "process identity changed before shutdown"))
+            return
         try:
             os.kill(pid, sig)
             if sig == _signal.SIGKILL:
-                killed.append(pid)
+                _mark_killed(pid)
         except ProcessLookupError:
-            killed.append(pid)  # already gone — count as killed
+            _mark_killed(pid)  # already gone — count as killed
         except (PermissionError, OSError) as e:
             failed.append((pid, str(e)))
 
-    for pid in pids:
+    for pid in targets:
         _send(pid, _signal.SIGTERM)
     deadline = _time.monotonic() + _POSIX_TERM_GRACE_SECONDS
-    pending = [p for p in pids if p not in killed and p not in {f[0] for f in failed}]
+    pending = [p for p in targets if p not in killed and p not in {f[0] for f in failed}]
     while pending and _time.monotonic() < deadline:
         _time.sleep(0.1)
         alive = [p for p in pending if _pid_exists(p)]  # os.kill(pid, 0) breaks on Windows
-        killed.extend(p for p in pending if p not in alive)
+        for pid in pending:
+            if pid not in alive:
+                _mark_killed(pid)
         pending = alive
     for pid in pending:
         _send(pid, _signal.SIGKILL)
