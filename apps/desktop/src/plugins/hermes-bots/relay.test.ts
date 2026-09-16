@@ -67,14 +67,15 @@ interface RelayCall {
   connectionId: string
   method: string
   params: Record<string, unknown>
+  timeout?: number
 }
 
 function respondWith(handler: (call: RelayCall) => unknown) {
   const calls: RelayCall[] = []
 
   ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
-    async (target: ProfileRoute, method: string, params: Record<string, unknown>) => {
-      const call = { connectionId: target.connectionId, method, params: structuredClone(params ?? {}) }
+    async (target: ProfileRoute, method: string, params: Record<string, unknown>, timeout?: number) => {
+      const call = { connectionId: target.connectionId, method, params: structuredClone(params ?? {}), timeout }
 
       calls.push(call)
 
@@ -534,6 +535,27 @@ describe('the drain loop wires drain → deliver → reply', () => {
     })
     // A delivered background DM is this bot's "good turn".
     expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
+
+    stopBotRelay()
+  })
+
+  it('derives the target delivery deadline from its configured lock wait', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: call.connectionId === 'a' ? [envelope] : [] }
+      }
+      if (call.method === 'bot_relay.deliver_budget') {
+        return { turn_wait_seconds: 600 }
+      }
+      return { reply: 'ok' }
+    })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.deliver_budget')).toMatchObject({ connectionId: 'b' })
+    expect(calls.find(call => call.method === 'bot_relay.deliver')?.timeout).toBe(1_980_000)
 
     stopBotRelay()
   })

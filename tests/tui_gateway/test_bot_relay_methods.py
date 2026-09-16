@@ -62,6 +62,12 @@ def test_outbox_drain_returns_each_envelope_once(home):
     assert second["envelopes"] == []
 
 
+def test_deliver_budget_reports_the_configured_turn_wait(home, monkeypatch):
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 600.0)
+    out = _result(srv._methods["bot_relay.deliver_budget"](1, {}))
+    assert out == {"turn_wait_seconds": 600.0}
+
+
 def test_deliver_validates_profile_and_runs_transport(home, monkeypatch):
     calls = {}
 

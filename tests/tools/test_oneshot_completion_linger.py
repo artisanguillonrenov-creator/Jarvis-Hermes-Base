@@ -139,6 +139,22 @@ def test_wait_times_out_on_stuck_process(registry):
     assert 0.4 <= elapsed < 5
 
 
+def test_explicit_completion_contract_outlives_the_general_linger(registry):
+    session = _make_session()
+    session.completion_linger_seconds = 0.35
+    with registry._lock:
+        registry._running[session.id] = session
+
+    def _finish():
+        time.sleep(0.2)
+        session.exited = True
+        session._completion_event.set()
+
+    threading.Thread(target=_finish, daemon=True).start()
+    result = registry.wait_for_pending_completions(timeout=0.05, poll_interval=0.05)
+    assert result["completed"] == [session.id]
+
+
 def test_timeout_zero_disables_linger(registry):
     s = _make_session()
     with registry._lock:
