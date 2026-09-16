@@ -409,7 +409,7 @@ _SKILL_REVIEW_PROMPT = (
     "     • `scripts/<name>.<ext>` — statically re-runnable actions the skill can invoke directly "
     "(verification scripts, fixture generators, deterministic probes, anything the agent should "
     "run rather than hand-type each time).\n"
-    "     Add support files via skill_manage action=write_file with file_path starting "
+    "     Add support files via skill_manage operations=[{name, write_file: {file_path, content}}] with file_path starting "
     "'references/', 'templates/', or 'scripts/'. The umbrella's SKILL.md should gain a one-line "
     "pointer to any new support file so future agents know it exists.\n"
     "  4. CREATE A NEW CLASS-LEVEL UMBRELLA SKILL when no existing skill covers the class. The "
@@ -478,7 +478,7 @@ _COMBINED_REVIEW_PROMPT = (
     "the right place — provided it is curator-managed. Protected and user-owned skills are "
     "off-limits however relevant; fall through when one of those is the best fit.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to find the right one). Patch it.\n"
-    "  3. ADD A SUPPORT FILE under an existing umbrella via skill_manage action=write_file. Three "
+    "  3. ADD A SUPPORT FILE under an existing umbrella via skill_manage operations=[{name, write_file: {file_path, content}}]. Three "
     "kinds: `references/<topic>.md` for topical depth (decision tables, recipes, quirks, condensed "
     "domain notes) — extend an existing topical file before creating one, never a per-session file; "
     "`templates/<name>.<ext>` for starter files meant to be copied and modified; "
@@ -623,7 +623,7 @@ def _action_lines(data: Dict, detail: Dict, verbose: bool) -> List[str]:
     if is_skill and "results" in data:
         # The requested operations are not evidence of applied writes (approval
         # and atomic rollback can leave all of them unapplied).
-        verbs = {"create": "created", "patch": "patched", "edit": "rewritten",
+        verbs = {"create": "created", "patch": "patched", "rewrite": "rewritten", "edit": "rewritten",
                  "write_file": "written", "remove_file": "removed", "delete": "deleted"}
         results = data.get("results")
         if not data.get("operations_applied") or not isinstance(results, list):
@@ -1109,7 +1109,7 @@ def _run_review_fork(
         deny_msg_fmt=(
             "Background review denied non-whitelisted tool: "
             "{tool_name}. Allowed here: skill_view/skills_list/read_file/search_files to read, "
-            "skill_manage(action='patch'|...) to change skills"
+            "skill_manage operations=[{name, patch: {old_string, new_string}}] to change skills"
             + memory_phrase_deny + "." + deny_extra + " Do not retry {tool_name}."
         ),
     )

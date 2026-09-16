@@ -75,8 +75,8 @@ Quality bar:
 - Don't write a router/index/hub skill that only points at other skills.
   (A knowledge-base SKILL.md indexing its OWN `references/` files is not a
   hub — that layout is required for large sources.)
-- Larger scripts/parsers belong in a `scripts/` file (add via
-  `skill_manage` write_file), referenced from SKILL.md by relative path — not
+- Larger scripts/parsers belong in a `scripts/` file (add via `skill_manage`
+  `operations=[{name, write_file: {file_path, content}}]`), referenced from SKILL.md by relative path — not
   inlined for the agent to re-type every run. References go in `references/`,
   templates in `templates/`."""
 
@@ -96,8 +96,8 @@ expansive skill:
   description. Keep SKILL.md itself within the normal size bar; the bulk
   lives in `references/`.
 - One file per chapter or major topic under `references/` (e.g.
-  `references/ch04-replication.md`), each added with `skill_manage`
-  write_file. Distill STRUCTURE, not summary: frameworks, definitions,
+  `references/ch04-replication.md`), each added with a `write_file` action
+  object. Distill STRUCTURE, not summary: frameworks, definitions,
   decision rules, anti-patterns, key numbers and tables, with
   chapter/section refs back to the source. Bullet-dense, roughly 100-150
   lines per file.
@@ -116,7 +116,7 @@ expansive skill:
   source, not a copy of it. No verbatim passages beyond a short quoted
   phrase. This is both the quality bar and the copyright line.
 - Fold-in, don't duplicate: if a skill for this source or topic already
-  exists, extend it (`skill_manage` patch / write_file) with the new
+  exists, extend it with `patch` / `write_file` action objects with the new
   material instead of creating a near-duplicate skill."""
 
 
@@ -171,18 +171,19 @@ def build_learn_prompt(user_request: str) -> str:
         "emphasizes, not just which sources you read.\n"
         "2. Save the skill with `skill_manage`. First check the available "
         "skills for one covering this source or topic. If one exists, load it "
-        "with `skill_view`, then extend its SKILL.md with `skill_manage` patch "
-        "(or edit for a necessary full rewrite) and add or update supporting "
-        "files with `skill_manage` write_file. Only when no matching skill "
-        "exists, create one with `skill_manage` action=\"create\" and pick a "
+        "with `skill_view`, then extend its SKILL.md with `skill_manage` "
+        "`operations=[{name, patch: {old_string, new_string}}]` (or `rewrite` "
+        "for a necessary full rewrite) and add or update supporting files with "
+        "a `write_file` action object. Only when no matching skill exists, "
+        "create one with `operations=[{name, create: {content, category}}]` and pick a "
         "sensible category. If the procedure needs a non-trivial script, add "
-        "it under the skill's `scripts/` with `skill_manage` write_file and "
+        "it under the skill's `scripts/` with a `write_file` action object and "
         "reference it by relative path.\n"
         "2b. Pick the shape by the source, not by habit: a workflow or small "
         "source gets ONE tight SKILL.md; a book, paper stack, spec, or large "
         "docs corpus gets the knowledge-base layout below — a lean SKILL.md "
-        "index plus per-chapter `references/` files added with `skill_manage` "
-        "write_file. If a single SKILL.md would force you to summarize away "
+        "index plus per-chapter `references/` files added with `write_file` "
+        "action objects. If a single SKILL.md would force you to summarize away "
         "most of the material, that is the signal to go expansive. For this "
         "layout, create or load the skill after inventorying the source, then "
         "read, distill, and persist one chapter/topic at a time before reading "

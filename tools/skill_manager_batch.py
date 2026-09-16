@@ -13,6 +13,99 @@ logger = logging.getLogger("tools.skill_manager_tool")
 
 _BATCH_OP_ACTIONS = {"create", "patch", "write_file", "remove_file"}
 _BATCH_MAX_OPS = 20
+_ACTION_KEY_MAP = {
+    "create": "create",
+    "patch": "patch",
+    "rewrite": "patch",
+    "write_file": "write_file",
+    "remove_file": "remove_file",
+    "delete": "delete",
+}
+_ACTION_KEY_FIELDS = {
+    "create": {"content", "category"},
+    "patch": {"old_string", "new_string", "replace_all", "file_path"},
+    "rewrite": {"content"},
+    "write_file": {"file_path", "content"},
+    "remove_file": {"file_path"},
+    "delete": {"absorbed_into"},
+}
+_CROSS_ACTION_HINTS = {
+    "file_content": "write_file.content",
+    "content": "rewrite.content (or create.content/write_file.content)",
+}
+
+
+def iter_recorded_skill_operations(arguments, *, raw_fallback=False):
+    """Yield legacy-like operation dicts from recorded flat or action-keyed calls."""
+    raw = arguments
+    if isinstance(raw, str):
+        try:
+            arguments = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            if raw_fallback:
+                yield {"_raw": raw}
+            return
+    if not isinstance(arguments, dict):
+        return
+    operations = arguments.get("operations")
+    if not isinstance(operations, list):
+        yield arguments
+        return
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        if op.get("action"):
+            yield op
+            continue
+        keys = [key for key in _ACTION_KEY_MAP if key in op]
+        if len(keys) != 1 or not isinstance(op[keys[0]], dict):
+            continue
+        key = keys[0]
+        flat = {
+            "name": op.get("name"), "action": _ACTION_KEY_MAP[key],
+            "source_action": key, **op[key],
+        }
+        if key == "write_file" and "content" in flat:
+            flat["file_content"] = flat.pop("content")
+        yield flat
+
+
+def _normalize_batch_operations(operations, tool_error):
+    """Translate the advertised action-keyed shape to the legacy flat handler shape."""
+    normalized = []
+    for i, op in enumerate(operations):
+        if not isinstance(op, dict) or "action" in op:
+            normalized.append(op)
+            continue
+        action_keys = [key for key in _ACTION_KEY_MAP if key in op]
+        if len(action_keys) != 1:
+            return None, tool_error(
+                f"operations[{i}] must contain exactly one action key: "
+                f"{', '.join(_ACTION_KEY_MAP)}.", success=False)
+        key = action_keys[0]
+        payload = op[key]
+        if not isinstance(payload, dict):
+            return None, tool_error(f"operations[{i}].{key} must be an object.", success=False)
+        wrong_fields = set(payload) - _ACTION_KEY_FIELDS[key]
+        if wrong_fields:
+            field = sorted(wrong_fields)[0]
+            hint = _CROSS_ACTION_HINTS.get(field)
+            correction = f" Use {hint} instead." if hint else ""
+            return None, tool_error(
+                f"operations[{i}].{key} does not accept '{field}'.{correction}", success=False)
+        unexpected = set(op) - {"name", key}
+        if unexpected:
+            return None, tool_error(
+                f"operations[{i}] has fields outside its '{key}' object: "
+                f"{', '.join(sorted(unexpected))}.", success=False)
+        flat = {
+            "name": op.get("name"), "action": _ACTION_KEY_MAP[key],
+            "source_action": key, **payload,
+        }
+        if key == "write_file" and "content" in flat:
+            flat["file_content"] = flat.pop("content")
+        normalized.append(flat)
+    return normalized, None
 
 
 def _validate_batch_ops(operations, default_name, tool_error):
@@ -123,6 +216,9 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         return tool_error("operations must be a non-empty array.", success=False)
     if len(operations) > _BATCH_MAX_OPS:
         return tool_error(f"operations is capped at {_BATCH_MAX_OPS} ops per call.", success=False)
+    operations, normalize_error = _normalize_batch_operations(operations, tool_error)
+    if normalize_error is not None:
+        return normalize_error
     if any(isinstance(op, dict) and op.get("action") == "delete" for op in operations):
         if len(operations) != 1:
             return tool_error("delete must be the SOLE op in its call — it doesn't "
@@ -155,8 +251,10 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
             return tool_error(snap_err, success=False)
         # Single-op path with the gate bypassed (the batch already cleared/staged it).
         results = []
+        success_records = []
         rollback_failed = False
         token = _smt._skill_gate_bypass.set(True)
+        success_token = _smt._deferred_skill_successes.set(success_records)
         try:
             for i, op in enumerate(operations):
                 raw = _smt._skill_manage_from({**op, "name": names[i], "operations": None},
@@ -178,15 +276,21 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
                         if k not in ("success", "error") and v is not None:
                             fail.setdefault(k, v)
                     return json.dumps(fail, ensure_ascii=False)
-                results.append({"name": names[i], "action": op["action"],
+                results.append({"name": names[i], "action": op.get("source_action", op["action"]),
                                 "file_path": op.get("file_path"), "success": True})
         finally:
+            _smt._deferred_skill_successes.reset(success_token)
             _smt._skill_gate_bypass.reset(token)
             if rollback_failed:
                 # Keep the snapshots so the operator can still recover by hand.
                 logger.warning("skill_manage batch rollback failed, snapshots kept at %s", snap_root)
             else:
                 shutil.rmtree(snap_root, ignore_errors=True)
+        # The filesystem batch has committed. Publish ledger, usage/cache and
+        # sync effects now; a failed batch returns from the loop above and
+        # discards this context-local queue instead.
+        for record in success_records:
+            _smt._record_success(**record)
     # utf-8-sig + errors="replace": SKILL.md files are user-authored and sometimes carry a Notepad BOM or
     # stray non-UTF-8 bytes. Pinning UTF-8 with replacement keeps skill_view deterministic across platforms
     # — falling back to the machine locale (cp1252/GBK) would make the same skill render differently per

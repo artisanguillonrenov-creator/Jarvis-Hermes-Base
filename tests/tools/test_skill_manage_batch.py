@@ -54,6 +54,40 @@ class TestSkillManageBatch(unittest.TestCase):
         for rel in ("SKILL.md", "references/a.md", "scripts/r.py"):
             self.assertTrue(os.path.exists(os.path.join(base, rel)), rel)
 
+    def test_action_keyed_operations_apply_atomically(self):
+        r = json.loads(self.smt.skill_manage(action="", name="", operations=[
+            {"name": "probe", "create": {"content": SK.format(n="probe")}},
+            {"name": "probe", "write_file": {
+                "file_path": "references/a.md", "content": "before"}},
+            {"name": "probe", "patch": {
+                "file_path": "references/a.md",
+                "old_string": "before", "new_string": "after"}},
+        ]))
+
+        self.assertTrue(r["success"], r)
+        self.assertEqual(r["operations_applied"], 3)
+        written = os.path.join(self.home, "skills", "probe", "references", "a.md")
+        self.assertEqual(open(written).read(), "after")
+
+        r = json.loads(self.smt.skill_manage(action="", name="", operations=[
+            {"name": "probe", "patch": {"file_content": "wrong slot"}},
+        ]))
+        self.assertFalse(r["success"])
+        self.assertIn("operations[0].patch", r["error"])
+        self.assertIn("file_content", r["error"])
+        self.assertIn("write_file.content", r["error"])
+
+    def test_action_keyed_delete_preserves_absorbed_into(self):
+        self._call("umbrella", [{"action": "create", "content": SK.format(n="umbrella")}])
+        self._call("probe", [{"action": "create", "content": SK.format(n="probe")}])
+
+        r = json.loads(self.smt.skill_manage(
+            action="", name="", operations=[{
+                "name": "probe", "delete": {"absorbed_into": "umbrella"},
+            }]))
+
+        self.assertTrue(r["success"], r)
+
     def test_midbatch_failure_rolls_back_existing_skill(self):
         self._call("probe", [{"action": "create", "content": SK.format(n="probe")}])
         r = self._call("probe", [
@@ -170,6 +204,8 @@ class TestSkillManageBatch(unittest.TestCase):
         ]))
         self.assertFalse(r["success"])
         self.assertEqual(r["failed_index"], 2)
+        from tools.skill_usage import load_usage
+        self.assertNotIn("beta", load_usage())
         # alpha's patch undone; beta (batch-created) removed entirely.
         content = open(os.path.join(self.home, "skills", "alpha", "SKILL.md")).read()
         self.assertIn("Step 1.", content)
