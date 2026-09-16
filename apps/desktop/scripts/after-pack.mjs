@@ -23,7 +23,7 @@ import path from 'node:path'
 
 import { stampExeIdentity } from './set-exe-identity.mjs'
 
-export default async function afterPack(context) {
+export default async function afterPack(context, { stamp = stampExeIdentity } = {}) {
   if (context.electronPlatformName !== 'win32') {
     return
   }
@@ -33,7 +33,7 @@ export default async function afterPack(context) {
   const desktopRoot = path.resolve(import.meta.dirname, '..')
 
   try {
-    await stampExeIdentity(exe, desktopRoot)
+    await stamp(exe, desktopRoot)
   } catch (err) {
     // Never fail the build over a cosmetic stamp.
     console.warn(`[after-pack] exe identity stamp failed (${err.message}); Hermes.exe keeps the stock Electron icon`)
