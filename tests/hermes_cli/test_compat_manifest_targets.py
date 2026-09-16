@@ -10,6 +10,7 @@ name, the facade attribute IS the sibling's object.
 """
 import importlib
 import json
+import os
 import pkgutil
 import sqlite3
 from pathlib import Path
@@ -18,6 +19,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 MANIFEST = ROOT / "compat_manifest.json"
+_WINDOWS_PTY_ALIASES = {
+    ("hermes_cli.web_server", "PtyBridge"): "hermes_cli.pty_bridge",
+    ("hermes_cli.web_server", "PtyUnavailableError"): "hermes_cli.pty_bridge",
+}
 
 # This file resolves every pointer on purpose; the once-per-name plugin warning is expected here.
 pytestmark = [
@@ -52,6 +57,9 @@ def test_moved_lazy_pointers_resolve_to_the_split_off_siblings_object():
     bad = []
     for e in _entries():
         facade, name = e["facade"], e["name"]
+        if os.name == "nt" and (facade, name) in _WINDOWS_PTY_ALIASES:
+            assert e["target"] == _WINDOWS_PTY_ALIASES[(facade, name)]
+            continue
         sibs = _sibling_modules(facade)
         if not sibs:
             continue
