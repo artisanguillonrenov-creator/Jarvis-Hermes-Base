@@ -106,10 +106,11 @@ lm_eval --model hf \
 
 ```bash
 # Full MMLU evaluation (57 subjects)
+# 5-shot evaluation (standard)
 lm_eval --model hf \
   --model_args pretrained=meta-llama/Llama-2-7b-hf \
   --tasks mmlu \
-  --num_fewshot 5 \  # 5-shot evaluation (standard)
+  --num_fewshot 5 \
   --batch_size 8 \
   --output_path results/ \
   --log_samples  # Save individual predictions
@@ -174,10 +175,11 @@ Evaluate every N training steps:
 CHECKPOINT_DIR=$1
 STEP=$2
 
+# 0-shot for speed
 lm_eval --model hf \
   --model_args pretrained=$CHECKPOINT_DIR/checkpoint-$STEP \
   --tasks gsm8k,hellaswag \
-  --num_fewshot 0 \  # 0-shot for speed
+  --num_fewshot 0 \
   --batch_size 16 \
   --output_path results/step-$STEP.json
 ```
@@ -493,6 +495,5 @@ code execution.
 - Docs: https://github.com/EleutherAI/lm-evaluation-harness/tree/main/docs
 - Task library: 60+ tasks including MMLU, GSM8K, HumanEval, TruthfulQA, HellaSwag, ARC, WinoGrande, etc.
 - Leaderboard: https://huggingface.co/spaces/HuggingFaceH4/open_llm_leaderboard (uses this harness)
-
 
 

@@ -21,6 +21,11 @@ MARKETING = re.compile(
     re.I,
 )
 MACHINE_LOCAL = re.compile(r"/home/(?!runner\b)[a-z0-9_-]+/|[A-Z]:\\+Users\\+(?!<)")
+SHELL_CONTINUATION_COMMENT = re.compile(r"\\[ \t]+#|\\\n[ \t]*#")
+SHELL_CONTINUATION_SKILLS = (
+    REPO / "optional-skills/mlops/evaluation/evaluating-llms-harness/SKILL.md",
+    REPO / "optional-skills/mlops/tensorrt-llm/SKILL.md",
+)
 
 # ---------------------------------------------------------------------------
 # Grandfathered pre-existing debt. Shrink this list; never grow it.
@@ -132,6 +137,13 @@ def test_no_machine_local_paths(p):
     m = MACHINE_LOCAL.search(content)
     if m and not _grandfathered(p, "paths"):
         pytest.fail(f"{_rel(p)}: machine-local path {m.group(0)!r}")
+
+
+@pytest.mark.parametrize("p", SHELL_CONTINUATION_SKILLS, ids=_rel)
+def test_shell_continuations_do_not_have_trailing_comments(p):
+    _, content = _frontmatter(p)
+    m = SHELL_CONTINUATION_COMMENT.search(content)
+    assert not m, f"{_rel(p)}: comment follows a shell continuation"
 
 
 @pytest.mark.parametrize("p", _params())
