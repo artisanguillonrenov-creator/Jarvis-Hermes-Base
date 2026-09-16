@@ -2043,11 +2043,20 @@ def _direct_personal_turn_mutation_error(rid, session: dict) -> dict | None:
 
 @method("session.interrupt")
 def _(rid, params: dict) -> dict:
-    from agent.turn_authorization import FIZKO_PERSON_ACCESS_TOKEN_PARAM, TurnAuthorization
+    from agent.turn_authorization import (
+        FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM,
+        FIZKO_PERSON_ACCESS_TOKEN_PARAM,
+        TurnAuthorization,
+    )
 
     raw_person_token = params.pop(FIZKO_PERSON_ACCESS_TOKEN_PARAM, None)
+    raw_person_token_expires_at = params.pop(
+        FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM, None
+    )
     try:
-        request_authorization = TurnAuthorization.from_raw(raw_person_token)
+        request_authorization = TurnAuthorization.from_raw(
+            raw_person_token, expires_at=raw_person_token_expires_at
+        )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
     session, err = _sess_nowait(params, rid)

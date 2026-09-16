@@ -22,6 +22,24 @@ def test_turn_authorization_holder_is_opaque_redacted_and_nonserializable():
         json.dumps(holder)
 
 
+def test_expired_person_authorization_remains_personal_but_has_no_header():
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        current_fizko_authorization_state,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+
+    holder = TurnAuthorization.from_raw("expired-person", expires_at=1.0)
+    token = set_current_turn_authorization(holder)
+    try:
+        assert holder.has_token is True
+        assert holder.is_expired is True
+        assert current_fizko_authorization_state() == (True, "")
+    finally:
+        reset_current_turn_authorization(token)
+
+
 def test_real_delegate_child_worker_does_not_inherit_parent_turn_authorization(monkeypatch):
     from agent.turn_authorization import (
         TurnAuthorization,

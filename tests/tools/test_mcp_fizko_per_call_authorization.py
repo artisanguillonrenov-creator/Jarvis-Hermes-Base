@@ -186,6 +186,38 @@ def test_opted_in_fizko_without_turn_token_keeps_profile_authorization(monkeypat
     assert recorded == [None]
 
 
+def test_expired_person_token_blocks_instead_of_falling_back_to_profile_authorization(monkeypatch):
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+    from tools import mcp_tool_handlers
+
+    server = _stub_handler_server({
+        "url": "https://mcp.fizko.ai/mcp",
+        "per_call_authorization": "fizko_person_access_token",
+    })
+    monkeypatch.setattr(mcp_tool_handlers, "_acquire_call_server", lambda *a: (server, None))
+    monkeypatch.setattr(
+        mcp_tool_handlers,
+        "_call_tool_racing_stdio_death",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("expired personal authority reached the MCP transport")
+        ),
+    )
+
+    context_token = set_current_turn_authorization(
+        TurnAuthorization.from_raw("expired-person", expires_at=1.0)
+    )
+    try:
+        result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
+    finally:
+        reset_current_turn_authorization(context_token)
+
+    assert "person authorization expired" in json.loads(result)["error"]
+
+
 def test_neighbor_mcp_is_not_given_per_call_headers(monkeypatch):
     from agent.turn_authorization import TurnAuthorization, reset_current_turn_authorization, set_current_turn_authorization
     from tools import mcp_tool_handlers

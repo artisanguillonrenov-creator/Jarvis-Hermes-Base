@@ -102,6 +102,32 @@ def test_queued_person_authorized_turn_does_not_bypass_compute_isolation(monkeyp
     assert events and events[0][0] == "error"
 
 
+def test_expired_queued_person_authorization_is_dropped_fail_closed(monkeypatch):
+    holder = TurnAuthorization.from_raw("expired-person", expires_at=time.time() - 1)
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = {
+        "text": "queued work",
+        "transport": None,
+        "turn_authorization": holder,
+    }
+    events = []
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: pytest.fail("expired queued prompt was dispatched"),
+    )
+
+    assert srv._drain_queued_prompt("r", "sid", session) is True
+
+    assert session["running"] is False
+    assert session.get("queued_prompt") is None
+    assert "_active_turn_authorization" not in session
+    assert events and events[0][0] == "error"
+    assert "expired" in events[0][2]["message"]
+
+
 def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monkeypatch, tmp_path):
     secret = "person-token-never-persist"
     seen = []
@@ -121,6 +147,7 @@ def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monk
         "session_id": "sid",
         "text": "hello",
         "_fizko_person_access_token": secret,
+        "_fizko_person_access_token_expires_at": time.time() + 3600,
     }
     monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
     monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))

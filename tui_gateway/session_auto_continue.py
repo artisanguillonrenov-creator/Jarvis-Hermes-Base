@@ -371,16 +371,23 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         _ac_set_queue(session, session.get("queued_prompts") or [])
         turn_authorization = queued.get("turn_authorization") or TurnAuthorization.from_raw(None)
         compute_host_required = _session_uses_compute_host(session)
-        if turn_authorization.has_token and compute_host_required:
+        if turn_authorization.has_token and turn_authorization.is_expired:
+            session["last_active"] = time.time()
+            reject_expired_personal = True
+            reject_personal_compute = False
+            use_compute_host = False
+        elif turn_authorization.has_token and compute_host_required:
             # A queued personal turn may outlive a config change.  Never bypass a
             # newly-enabled process-isolation boundary to drain it inline.
             session["last_active"] = time.time()
+            reject_expired_personal = False
             reject_personal_compute = True
             use_compute_host = False
         else:
+            reject_expired_personal = False
             reject_personal_compute = False
             use_compute_host = compute_host_required
-        if reject_personal_compute:
+        if reject_expired_personal or reject_personal_compute:
             session["running"] = False
             _clear_active_turn_state(session, turn_authorization)
         else:
@@ -392,8 +399,15 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
         # whole drained turn. A peer that disconnected while its prompt sat in the queue is skipped: the
         # prompt still runs, only the dead pin is dropped.
-        if not reject_personal_compute and queued_transport is not None and not _transport_is_dead(queued_transport):
+        if (
+            not (reject_expired_personal or reject_personal_compute)
+            and queued_transport is not None
+            and not _transport_is_dead(queued_transport)
+        ):
             _attach_session_transport(session, queued_transport)
+    if reject_expired_personal:
+        _emit("error", sid, {"message": "person authorization expired before the queued turn ran"})
+        return True
     if reject_personal_compute:
         _emit("error", sid, {
             "message": "person-authorized turns are unavailable while turn isolation is enabled"

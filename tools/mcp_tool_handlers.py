@@ -555,13 +555,15 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # Read on the tool worker before crossing to the dedicated MCP loop.  The local
             # dict is captured by every retry closure, so reconnect/auth retries preserve the
             # exact turn credential even if ambient context changes meanwhile.
-            from agent.turn_authorization import current_fizko_authorization_header
+            from agent.turn_authorization import current_fizko_authorization_state
 
-            person_header = current_fizko_authorization_header()
+            personal_turn, person_header = current_fizko_authorization_state()
             # Profiles are shared by the web chat and channels such as WhatsApp.
             # Only token-bearing web turns override the connection credential;
             # ordinary channel turns keep the profile's configured Authorization.
-            if person_header:
+            if personal_turn and not person_header:
+                return tool_error("person authorization expired; the MCP request was blocked")
+            if personal_turn:
                 request_headers = {"Authorization": person_header}
 
         async def _call():
