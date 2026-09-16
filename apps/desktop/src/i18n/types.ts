@@ -2141,6 +2141,7 @@ export interface Translations {
     close: string
     title: string
     count: (count: number) => string
+    shownOf: (shown: number, total: number) => string
     modelImpact: {
       title: string
       message: (count: number) => string
