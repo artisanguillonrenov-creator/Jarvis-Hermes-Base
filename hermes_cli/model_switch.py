@@ -861,12 +861,49 @@ def _configured_provider_matches(
                    if isinstance(e.get("name"), str) and e["name"].strip()]
 
     matches: dict[str, str] = {}
+    matched_identities: list[tuple[str, frozenset[str], tuple[str, str, str, str]]] = []
     for slug, cfg in candidates:
         hit = next((mid for key in ("models", "model", "default_model")
                     for mid in _declared_model_ids(cfg.get(key)) if mid.lower() == target), None)
-        if hit:
-            matches.setdefault(slug, hit)  # first declaration wins
+        if not hit:
+            continue
+        provider_key, aliases, metadata = _configured_provider_identity(slug, cfg)
+        # ``get_compatible_custom_providers()`` projects ``providers.<slug>`` as
+        # ``custom:<name>``.  Treat that projection as the same endpoint only
+        # when its stable aliases AND routing metadata agree; matching a display
+        # name alone would hide genuinely distinct configured providers.
+        if any(provider_key and provider_key == known_key and aliases & known_aliases
+               and metadata == known_metadata
+               for known_key, known_aliases, known_metadata in matched_identities):
+            continue
+        matches.setdefault(slug, hit)  # first declaration wins
+        matched_identities.append((provider_key, aliases, metadata))
     return matches
+
+
+def _configured_provider_identity(
+    slug: str, cfg: dict
+) -> tuple[str, frozenset[str], tuple[str, str, str, str]]:
+    """Stable aliases and endpoint metadata for configured-provider deduplication."""
+    def normalized(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    name = normalized(cfg.get("name")) or normalized(slug.removeprefix("custom:"))
+    provider_key = normalized(cfg.get("provider_key"))
+    if not provider_key and not slug.startswith("custom:"):
+        provider_key = normalized(slug)
+    base_url = next((normalized(cfg.get(field)).rstrip("/")
+                     for field in ("base_url", "url", "api") if normalized(cfg.get(field))), "")
+    auth = next((f"{field}:{normalized(cfg.get(field))}"
+                 for field in ("api_key", "key_env", "api_key_env", "key_cmd")
+                 if normalized(cfg.get(field))), "")
+    api_mode = normalized(cfg.get("api_mode") or cfg.get("transport"))
+    try:
+        from hermes_cli.config_providers import _canonical_api_mode
+        api_mode = _canonical_api_mode(api_mode) if api_mode else ""
+    except Exception:
+        pass
+    return provider_key, custom_provider_aliases(name, provider_key), (name, base_url, auth, api_mode)
 
 
 def _resolve_named_custom_model_id(model_name: str, target_provider: str, custom_providers: Optional[list]) -> str:
