@@ -125,25 +125,73 @@ def _ac_inflight_original(session: dict) -> str:
     return str(turn.get("user") or "").strip() if isinstance(turn, dict) else ""
 
 
-def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
-                    turn_author: dict | None = None) -> None:
+def _same_as_active_turn_authorization(session: dict, authorization) -> bool:
+    """Treat legacy/no-token holders alike; compare personal credentials in constant time."""
+    active = session.get("_active_turn_authorization")
+    if authorization is None:
+        return active is None or not active.has_token
+    if active is None:
+        return not authorization.has_token
+    return authorization.same_credential(active)
+
+
+_ANY_ACTIVE_AUTHORIZATION = object()
+
+
+def _clear_active_turn_state(session: dict, expected=_ANY_ACTIVE_AUTHORIZATION) -> bool:
+    """Clear the authorization + execution route owned by one admitted turn.
+
+    Caller holds ``history_lock``.  An expected holder makes late cleanup unable
+    to erase a newer turn that won admission in the meantime.
+    """
+    current = session.get("_active_turn_authorization")
+    if expected is not _ANY_ACTIVE_AUTHORIZATION and current is not expected:
+        # The expected turn may already have been revoked by interrupt/reset;
+        # its late cleanup may still release ``running`` while the slot remains
+        # unclaimed. Never touch a newer admission's holder or route.
+        if current is not None or "_active_turn_route" in session:
+            return False
+    session.pop("_active_turn_authorization", None)
+    session.pop("_active_turn_route", None)
+    return True
+
+
+def _enqueue_prompt(
+    session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
+    turn_author: dict | None = None, turn_authorization=None,
+) -> None:
     """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
     consecutive-user merge in ``repair_message_sequence``); image-bearing and authored ones stay separate
     envelopes so attachment chronology and the sender survive. ``transport`` is pinned so the drained turn
     streams to its sender."""
+    from agent.turn_authorization import TurnAuthorization
+
     image_paths = list(image_paths or [])
+    # Missing authorization is an explicit no-token identity for queue isolation:
+    # an internal follow-up must never merge into a personal caller's envelope.
+    authorization = turn_authorization or TurnAuthorization.from_raw(None)
     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}" and re-fire the
     # original after a correction settles.
     # See #84417.
     _drop_queued_duplicates_of_inflight_user(session)
     text_only = not image_paths and isinstance(text, str)
     # A text-only self-copy of the live prompt would restart it on drain; an authored copy is another sender's message.
-    if text_only and not turn_author and text.strip() == _ac_inflight_original(session) != "":
+    if (text_only and not turn_author and _same_as_active_turn_authorization(session, authorization)
+            and text.strip() == _ac_inflight_original(session) != ""):
         return
-    queued = {"text": text, "transport": transport, **({"image_paths": image_paths} if image_paths else {}),
-              **({"turn_author": turn_author} if turn_author else {})}
+    queued = {
+        "text": text,
+        "transport": transport,
+        **({"image_paths": image_paths} if image_paths else {}),
+        **({"turn_author": turn_author} if turn_author else {}),
+        **({"turn_authorization": authorization} if authorization.has_token else {}),
+    }
     existing = session.get("queued_prompt")
-    if (existing and text_only and not turn_author and isinstance(existing.get("text"), str)
+    existing_authorization = existing.get("turn_authorization") if existing else None
+    same_authorization = authorization.same_credential(
+        existing_authorization or TurnAuthorization.from_raw(None)
+    )
+    if (existing and same_authorization and text_only and not turn_author and isinstance(existing.get("text"), str)
             and not existing.get("image_paths") and not existing.get("turn_author")
             and not session.get("queued_prompts")):
         prev = existing["text"]
@@ -154,7 +202,9 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
         session["queued_prompt"] = queued
 
 
-def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict | None:
+def _sanitize_queued_entry_vs_inflight_user(
+    entry: Any, original: str, active_authorization=None,
+) -> dict | None:
     """Drop (``None``) a text-only self-duplicate of the live user text, or rewrite a merged slot
     ``"{original}\\n\\n{later}"`` to ``later`` so the correction survives without re-firing the original. Image-bearing
     and authored envelopes are left alone: chronology and the sender's own words are kept.
@@ -165,6 +215,18 @@ def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict |
     """
     if not isinstance(entry, dict):
         return None
+    entry_authorization = entry.get("turn_authorization")
+    same_authorization = (
+        (active_authorization is None and not entry_authorization.has_token)
+        or (
+            active_authorization is not None
+            and entry_authorization.same_credential(active_authorization)
+        )
+    ) if entry_authorization is not None else (
+        active_authorization is None or not active_authorization.has_token
+    )
+    if not same_authorization:
+        return entry
     text = entry.get("text")
     if not original or entry.get("image_paths") or entry.get("turn_author") or not isinstance(text, str):
         return entry
@@ -185,7 +247,8 @@ def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
     if not (original := _ac_inflight_original(session)):
         return
     head = session.get("queued_prompt")
-    cleaned = (_sanitize_queued_entry_vs_inflight_user(e, original)
+    active_authorization = session.get("_active_turn_authorization")
+    cleaned = (_sanitize_queued_entry_vs_inflight_user(e, original, active_authorization)
                for e in ([head] if head else []) + list(session.get("queued_prompts") or []))
     _ac_set_queue(session, [c for c in cleaned if c is not None])
 
@@ -204,7 +267,7 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     until a blocking call returns; inline it stalled ``session.resume``). At most one interrupt worker per session so
     repeated steering can't leak threads."""
     use_agent = agent is not None and hasattr(agent, "interrupt")
-    if not use_agent and not _session_uses_compute_host(session):
+    if not use_agent and not _session_active_turn_uses_compute_host(session):
         return
     with session["history_lock"]:
         if session.get("_busy_interrupt_pending"):
@@ -237,8 +300,10 @@ def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: 
     return _ok(rid, {"status": status})
 
 
-def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
-                        turn_author: dict | None = None) -> dict | None:
+def _handle_busy_submit(
+    rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
+    turn_author: dict | None = None, turn_authorization=None,
+) -> dict | None:
     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
@@ -251,6 +316,15 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
         image_paths = list(session.get("attached_images", []))
         if image_paths:
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
+        active_authorization = session.get("_active_turn_authorization")
+    if (
+        bool(getattr(active_authorization, "has_token", False))
+        or bool(getattr(turn_authorization, "has_token", False))
+    ):
+        # Personal authorization is scoped to one admitted turn. Even the same
+        # credential waits for a fresh authenticated turn rather than touching
+        # a live agent across the holder/agent race window.
+        mode = "queue"
     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
     # the proven interrupt + queue path.
@@ -269,7 +343,9 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             if image_paths:
                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
             return None
-        _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
+        _enqueue_prompt(
+            session, text, transport, image_paths=image_paths, turn_author=turn_author,
+            turn_authorization=turn_authorization)
         session["last_active"] = time.time()
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
@@ -286,20 +362,43 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
     skips lower-priority follow-ups this cycle (the user's message wins)."""
+    from agent.turn_authorization import TurnAuthorization
+
     with session["history_lock"]:
         if session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
-        session["running"] = True
+        turn_authorization = queued.get("turn_authorization") or TurnAuthorization.from_raw(None)
+        compute_host_required = _session_uses_compute_host(session)
+        if turn_authorization.has_token and compute_host_required:
+            # A queued personal turn may outlive a config change.  Never bypass a
+            # newly-enabled process-isolation boundary to drain it inline.
+            session["last_active"] = time.time()
+            reject_personal_compute = True
+            use_compute_host = False
+        else:
+            reject_personal_compute = False
+            use_compute_host = compute_host_required
+        if reject_personal_compute:
+            session["running"] = False
+            _clear_active_turn_state(session, turn_authorization)
+        else:
+            session["running"] = True
+            session["_active_turn_route"] = "compute" if use_compute_host else "inline"
+            session["_active_turn_authorization"] = turn_authorization
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
         # whole drained turn. A peer that disconnected while its prompt sat in the queue is skipped: the
         # prompt still runs, only the dead pin is dropped.
-        if queued_transport is not None and not _transport_is_dead(queued_transport):
+        if not reject_personal_compute and queued_transport is not None and not _transport_is_dead(queued_transport):
             _attach_session_transport(session, queued_transport)
-    use_compute_host = _session_uses_compute_host(session)
+    if reject_personal_compute:
+        _emit("error", sid, {
+            "message": "person-authorized turns are unavailable while turn isolation is enabled"
+        })
+        return True
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
             # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
@@ -308,6 +407,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             advanced = session.get("queued_prompt")
             _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
             session["running"] = False
+            _clear_active_turn_state(session, turn_authorization)
             return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
     if queued.get("image_paths"):
@@ -315,13 +415,21 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     # The compute-host frame has no author field, so only the inline runner receives it.
     author_kwargs = {"turn_author": queued["turn_author"]} if queued.get("turn_author") else {}
     dispatch_failed = False
+    restore_claim = False
     try:
         if not use_compute_host:
-            _run_prompt_submit(rid, sid, session, queued["text"], **kwargs, **author_kwargs)
+            if turn_authorization.has_token:
+                kwargs["turn_authorization"] = turn_authorization
+            if _run_prompt_submit(
+                rid, sid, session, queued["text"], **kwargs, **author_kwargs
+            ) is False:
+                dispatch_failed = True
+                restore_claim = True
         elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
             with session["history_lock"]:
                 session["running"] = False
                 _clear_inflight_turn(session)
+                _clear_active_turn_state(session, turn_authorization)
             _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True
     except Exception as exc:
@@ -330,8 +438,18 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         dispatch_failed = True
     if dispatch_failed:
         with session["history_lock"]:
+            if (restore_claim and not session.get("_closing") and not session.get("_turn_cancel_requested")
+                    and int(session.get("_queued_prompt_generation", 0)) == queue_generation):
+                advanced = session.get("queued_prompt")
+                _ac_set_queue(
+                    session,
+                    [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])],
+                )
+            if session.get("_active_turn_authorization") is turn_authorization:
+                session["running"] = False
+                _clear_active_turn_state(session, turn_authorization)
             drain_next = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
-        if drain_next:
+        if drain_next and not restore_claim:
             _drain_queued_prompt(rid, sid, session)
     return True
 

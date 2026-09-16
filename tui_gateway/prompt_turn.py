@@ -108,10 +108,13 @@ def _plan_goal_compression_recovery(
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
     queued_prompt_generation: int | None, display_kind: str | None,
-    display_metadata: dict | None) -> tuple[list[str], Any] | None:
+    display_metadata: dict | None, turn_authorization=None,
+) -> tuple[list[str], Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    from tui_gateway.session_auto_continue import _clear_active_turn_state
+
     # When the session already holds its lease this is a cheap dict check. See #94778.
     if (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
         logger.info(
@@ -119,14 +122,16 @@ def _admit_prompt_turn(
             session.get("session_key") or sid,
             getattr(ownership_refusal, "reason", None) or "refused")
         with session["history_lock"]:
-            session["running"] = False
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
         _emit("error", sid, {"message": str(ownership_refusal)})
         return None
     with session["history_lock"]:
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
-            session["running"] = False
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
             return None
         images = list(session.get("attached_images", []) if image_paths is None else image_paths)
         if image_paths is None:
@@ -845,7 +850,10 @@ def _run_prompt_submit(
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
-    turn_author: dict | None = None) -> bool:
+    turn_author: dict | None = None, turn_authorization=None) -> bool:
+    from agent.turn_authorization import TurnAuthorization
+    from tui_gateway.session_auto_continue import _clear_active_turn_state
+
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -854,9 +862,20 @@ def _run_prompt_submit(
         logger.warning(
             "prompt dispatch: session store unavailable for %s — this turn may not persist",
             session.get("session_key") or sid)
+    authorization = turn_authorization or TurnAuthorization.from_raw(None)
+    with session["history_lock"]:
+        # Synthesized callers predate explicit authorization admission. Give
+        # their already-claimed inline turn an opaque no-token holder too, so
+        # all completion/failure cleanup uses the same identity fence.
+        if session.get("running") and session.get("_active_turn_authorization") is None:
+            session["_active_turn_authorization"] = authorization
+            session.setdefault("_active_turn_route", "inline")
     admitted = _admit_prompt_turn(
-        sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata)
+        sid, session, text, image_paths, queued_prompt_generation, display_kind,
+        display_metadata, authorization)
     if admitted is None:
+        with session["history_lock"]:
+            _clear_active_turn_state(session, authorization)
         return False
     images, agent = admitted
     # The ONE INFO record proving a prompt was accepted by THIS process; ties ui sid,
@@ -876,6 +895,11 @@ def _run_prompt_submit(
     _emit("message.start", sid)
 
     def run():
+        from agent.turn_authorization import (
+            reset_current_turn_authorization,
+            set_current_turn_authorization,
+        )
+
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
@@ -885,6 +909,7 @@ def _run_prompt_submit(
             receipt_committed=terminal_callback is None)
         st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None)
         goal_followup = None
+        authorization_token = set_current_turn_authorization(authorization)
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
@@ -911,17 +936,21 @@ def _run_prompt_submit(
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
+            # End the authorization scope before persistence/events/follow-ups: none of those
+            # surfaces may inherit or serialize the person's bearer.
+            reset_current_turn_authorization(authorization_token)
             _finish_turn(sid, session, st)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
             # A stale interim closure must not fire during a later turn.
             st.agent.interim_assistant_callback = None
             with session["history_lock"]:
-                session["running"] = False
-                session["last_active"] = time.time()
-                if not st.error_retained:
-                    _clear_inflight_turn(session)
-                _release_hosted_room_turn_slot(session)
+                if _clear_active_turn_state(session, authorization):
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    if not st.error_retained:
+                        _clear_inflight_turn(session)
+                    _release_hosted_room_turn_slot(session)
             # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
             # agent.session_id is re-read because compression may have rotated it (an
             # accepted/finished pair whose id changed IS a rotation trace).
@@ -960,7 +989,8 @@ def _run_prompt_submit(
             run_thread.start()
     if not can_start:
         with session["history_lock"]:
-            session["running"] = False
+            if _clear_active_turn_state(session, authorization):
+                session["running"] = False
     return can_start
 
 

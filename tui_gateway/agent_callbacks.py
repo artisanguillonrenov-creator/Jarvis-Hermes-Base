@@ -444,6 +444,11 @@ def _rebuild_session_agent(sid: str, session: dict, **kwargs):
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
+    # Reset is a conversation boundary. Revoke a personal turn before doing
+    # any rebuild work so no stale holder survives an exception or races a
+    # newly admitted turn.
+    with session["history_lock"]:
+        _clear_active_turn_state(session)
     updates = dict(
         attached_images=[], queued_prompt=None,
         _queued_prompt_generation=int(session.get("_queued_prompt_generation", 0)) + 1,

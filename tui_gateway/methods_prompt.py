@@ -480,12 +480,16 @@ def _persist_session_row_for_submit(rid, session):
         session["running"] = False
         session["last_active"] = time.time()
         session.pop("_hosted_room_task", None)
+        _clear_active_turn_state(session)
         _clear_inflight_turn(session)
         _release_active_session_slot(session)
     return error
 
 
-def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author=None):
+def _run_after_agent_ready(
+    rid, sid, session, text, display_kind, hosted_terminal_callback,
+    turn_author=None, turn_authorization=None,
+):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
@@ -499,35 +503,52 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
             sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
         with session["history_lock"]:
-            session["running"] = False
-            session["last_active"] = time.time()
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
+                session["last_active"] = time.time()
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
     with session["history_lock"]:
         if session.get("_turn_cancel_requested") or not session.get("running"):
-            session["running"] = False
-            _clear_inflight_turn(session)
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
+                _clear_inflight_turn(session)
             # Without this emit the turn vanishes silently after {"status": "streaming"}.
             _emit("error", sid, {"message": (
                 "Turn cancelled before the agent was ready"
                 if session.get("_turn_cancel_requested")
                 else "Session no longer running before the agent was ready")})
             return
-    _run_prompt_submit(
+    started = _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        terminal_callback=hosted_terminal_callback, turn_author=turn_author,
+        turn_authorization=turn_authorization)
+    if not started:
+        with session["history_lock"]:
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
 
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
 
+_SUBMIT_TURN_BECAME_BUSY = object()
+
 
 def _lock_in_submit_turn(
-    rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind):
+    rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task,
+    display_kind, turn_authorization, turn_isolation,
+):
     """Under ``history_lock``: refuse watch-child races / malformed truncation, apply the
     cut, mark the turn running + in flight.  Returns ``(err, survivor_fields)``."""
     fields = {}
     with session["history_lock"]:
+        # The optimistic idle check in prompt.submit intentionally releases this
+        # lock before reaching here. A queue drain may claim the turn meanwhile;
+        # send the caller back through the authenticated busy-input path rather
+        # than overwriting its running/route/authorization triple.
+        if session.get("running"):
+            return _SUBMIT_TURN_BECAME_BUSY, fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.
         if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
@@ -544,6 +565,8 @@ def _lock_in_submit_turn(
                 return err, {}
         session["running"] = True
         session["_turn_cancel_requested"] = False
+        session["_active_turn_route"] = "compute" if turn_isolation else "inline"
+        session["_active_turn_authorization"] = turn_authorization
         session["last_active"] = time.time()
         if hosted_task is not None:
             session["_hosted_room_task"] = dict(hosted_task)
@@ -557,6 +580,14 @@ _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    from agent.turn_authorization import FIZKO_PERSON_ACCESS_TOKEN_PARAM, TurnAuthorization
+
+    raw_person_token = params.pop(FIZKO_PERSON_ACCESS_TOKEN_PARAM, None)
+    try:
+        turn_authorization = TurnAuthorization.from_raw(raw_person_token)
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
+
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
@@ -605,7 +636,18 @@ def _(rid, params: dict) -> dict:
         # A rewind replays what the transcript shows: re-expand a skill invocation or
         # `/work fix it` sends nine literal chars.
         text = _expand_skill_invocation_for_replay(text, str(session.get("session_key") or ""))
-    turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
+    turn_isolation = _session_uses_compute_host(
+        session, _load_dashboard_process_isolation_config()
+    )
+    if turn_authorization.has_token and turn_isolation:
+        # The compute-host protocol has no private authority channel.  Running the
+        # turn inline would silently weaken an isolation boundary; fail closed until
+        # the bearer can be transported out-of-band to the worker.
+        return _err(
+            rid,
+            4126,
+            "person-authorized turns are unavailable while turn isolation is enabled",
+        )
     if internal_hosted_submit and turn_isolation:
         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
     # Re-bind to the current transport: streaming must stay on the active websocket even
@@ -629,15 +671,31 @@ def _(rid, params: dict) -> dict:
                 return _err(rid, 4091, "hosted room member session is busy")
             busy_transport = t or session.get("transport")
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author)
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
+            turn_author=turn_author, turn_authorization=turn_authorization)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
-    err, survivor_fields = _lock_in_submit_turn(
-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+    while True:
+        err, survivor_fields = _lock_in_submit_turn(
+            rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task,
+            display_kind, turn_authorization, turn_isolation)
+        if err is not _SUBMIT_TURN_BECAME_BUSY:
+            break
+        # A queued turn claimed the idle slot between the optimistic check and
+        # atomic admission. Re-enter the authenticated busy-input path. If that
+        # turn finishes before correction, retry admission instead of dropping
+        # this prompt.
+        with session["history_lock"]:
+            busy_transport = t or session.get("transport")
+        busy_response = _handle_busy_submit(
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
+            turn_author=turn_author, turn_authorization=turn_authorization)
+        if busy_response is not None:
+            return busy_response
     if err is not None:
         return err
     if turn_isolation:
@@ -661,6 +719,9 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
+        with session["history_lock"]:
+            if session.get("_active_turn_authorization") is turn_authorization:
+                session["_active_turn_route"] = "inline"
     if (err := _persist_session_row_for_submit(rid, session)) is not None:
         return err
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
@@ -668,7 +729,8 @@ def _(rid, params: dict) -> dict:
         _start_agent_build(sid, session)
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author),
+            rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author,
+            turn_authorization),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread

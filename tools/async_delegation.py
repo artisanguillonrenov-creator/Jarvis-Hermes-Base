@@ -591,7 +591,13 @@ def _dispatch(
 
     try:
         # Propagate the dispatching profile so the detached child resolves get_hermes_home() correctly.
-        executor.submit(propagate_context_to_thread(_worker))
+        # Capture that portable context with turn-local bearer authority removed:
+        # this daemon work can outlive the foreground tool call that launched it.
+        from agent.turn_authorization import without_turn_authorization
+
+        with without_turn_authorization():
+            detached_worker = propagate_context_to_thread(_worker)
+        executor.submit(detached_worker)
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         with _records_lock:
             _records.pop(delegation_id, None)

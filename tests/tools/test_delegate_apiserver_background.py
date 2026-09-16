@@ -15,6 +15,7 @@ dispatch code reads it — the fake child build below reproduces that clobber.
 """
 
 import json
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -140,6 +141,59 @@ def test_apiserver_session_with_id_dispatches_background(monkeypatch):
     # id, not the subagent-internal id the child build clobbered
     # HERMES_SESSION_ID with (see clobbering_build_child).
     assert evt["origin_session_id"] == "raw-sid-7"
+
+
+def test_real_background_delegate_task_drops_parent_turn_authorization(monkeypatch):
+    from agent.turn_authorization import (
+        TurnAuthorization,
+        current_fizko_authorization_header,
+        reset_current_turn_authorization,
+        set_current_turn_authorization,
+    )
+
+    dt = _patch_delegate(monkeypatch)
+    seen = []
+    ran = threading.Event()
+
+    def inspect_background_authority(task_index, goal, child=None, parent_agent=None, **kwargs):
+        seen.append(current_fizko_authorization_header())
+        ran.set()
+        return {
+            "task_index": task_index,
+            "status": "completed",
+            "summary": f"done: {goal}",
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+            "model": "m",
+            "exit_reason": "completed",
+        }
+
+    monkeypatch.setattr(dt, "_run_single_child", inspect_background_authority)
+    monkeypatch.setenv("HERMES_SESSION_ID", "raw-sid-auth")
+    set_session_vars(
+        platform="api_server",
+        chat_id="raw-sid-auth",
+        session_key="raw-sid-auth",
+        session_id="raw-sid-auth",
+        session_history_delivery="1",
+        async_delivery=False,
+    )
+    token = set_current_turn_authorization(TurnAuthorization.from_raw("parent-person"))
+    try:
+        out = dt.delegate_task(
+            goal="detached authority boundary",
+            context="ctx",
+            background=True,
+            parent_agent=_fake_parent(),
+        )
+        assert current_fizko_authorization_header() == "Bearer parent-person"
+        assert json.loads(out)["status"] == "dispatched"
+        assert ran.wait(5)
+        assert _drain_one() is not None
+    finally:
+        reset_current_turn_authorization(token)
+
+    assert seen == [""]
 
 
 # ---------------------------------------------------------------------------

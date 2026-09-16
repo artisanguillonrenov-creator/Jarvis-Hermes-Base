@@ -34,6 +34,16 @@ def _session_uses_compute_host(session: dict, cfg: dict | None = None) -> bool:
         or (session.get("agent") is None and session.get("agent_ready") is not None))
 
 
+def _session_active_turn_uses_compute_host(session: dict) -> bool:
+    """Route control to the runner selected when the active turn was admitted."""
+    with session["history_lock"]:
+        running = bool(session.get("running"))
+        route = session.get("_active_turn_route")
+    if running and route in {"inline", "compute"}:
+        return route == "compute"
+    return _session_uses_compute_host(session)
+
+
 def _get_compute_host_supervisor(cfg: dict | None = None):
     global _compute_host_supervisor
     isolation_cfg = cfg or _load_dashboard_process_isolation_config()
@@ -207,7 +217,9 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
         session["running"] = False
         session["last_active"] = time.time()
         _clear_inflight_turn(session)
+        _clear_active_turn_state(session)
         session.pop("_compute_host_open_request", None)
+        session.pop("_compute_host_pending_clarify", None)
     if frame.get("type") == "turn.error":
         message = str(frame.get("message") or "compute host turn failed")
         _emit("message.complete", sid, {"text": f"Error: {message}", "status": "error"})
