@@ -63,6 +63,26 @@ def test_recorded_display_held_by_a_live_server_is_not_reused(tmp_path, monkeypa
     assert runtime._allocate_display() == 37, "a free recorded number is reclaimed"
 
 
+def test_live_server_without_its_lock_file_still_owns_the_display(tmp_path, monkeypatch):
+    """Regression for #109941: a /tmp reaper removes ``.X<n>-lock`` while Xvnc keeps running. The server's
+    abstract socket ``@/tmp/.X11-unix/X<n>`` stays bound for its whole life, so that is the liveness the
+    allocator must honour — handing the number out makes the next launcher die with 'server already running'."""
+    monkeypatch.setattr(runtime, "_X_LOCK_DIR", tmp_path / "xlocks")  # no lock file for anyone
+    (tmp_path / "xlocks").mkdir()
+    table = tmp_path / "unix"
+    table.write_text(
+        "Num       RefCount Protocol Flags    Type St Inode Path\n"
+        "0000000000000000: 00000002 00000000 00010000 0001 01 22242 @/tmp/.X11-unix/X20\n"
+        "0000000000000000: 00000002 00000000 00010000 0001 01 22243 /tmp/.X11-unix/X21\n"
+        "0000000000000000: 00000003 00000000 00000000 0001 03 22244 @/tmp/.X11-unix/X200\n", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_X_UNIX_TABLE", table)
+    assert runtime._display_in_use(20) is True
+    assert runtime._display_in_use(21) is True
+    assert runtime._display_in_use(22) is False  # :200 is not :22 — no prefix matching
+    monkeypatch.setattr(runtime, "_X_UNIX_TABLE", tmp_path / "missing")
+    assert runtime._display_in_use(20) is False, "no table (non-Linux procfs) falls back to the lock alone"
+
+
 
 _FAKE_LAUNCHER = """#!/usr/bin/env bash
 # Stands in for launcher.sh + Xvnc: the X lock appears only after a delay (the TOCTOU window), then the
@@ -188,6 +208,7 @@ def in_process_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "state_dir", lambda: home / "bot-desktop")
     monkeypatch.setattr(runtime, "_LAUNCHER", tmp_path / "launcher.sh")
     monkeypatch.setattr(runtime, "_X_LOCK_DIR", tmp_path / "xlocks")
+    monkeypatch.setattr(runtime, "_X_UNIX_TABLE", tmp_path / "unix")  # the host's real X servers stay out of the band
     monkeypatch.setattr(runtime, "_ALLOC_LOCK", tmp_path / "alloc.lock")
     monkeypatch.setattr(runtime, "missing_binaries", lambda: [])
     monkeypatch.setattr(runtime, "geometry", lambda: "800x600")
@@ -225,6 +246,37 @@ def test_orphaned_x_server_of_a_dead_launcher_is_reaped_on_next_start(in_process
     assert runtime.stop() is True
 
 
+@pytest.mark.linux_only
+@pytest.mark.live_system_guard_bypass  # the orphan is reparented to init: signalling it is the point
+def test_orphaned_x_server_is_found_by_its_socket_when_the_lock_file_is_gone(tmp_path, monkeypatch):
+    """Case B of #109941: the launcher was SIGKILLed AND a /tmp reaper removed ``.X<n>-lock`` (or the failed
+    launch dropped ``display``). The lock was the reaper's only handle, so the live Xvnc leaked forever and
+    each restart allocated a new number beside it. The socket path on its command line names it too."""
+    import os
+    import shutil
+    import subprocess
+
+    sd = tmp_path / "bot-desktop"
+    sd.mkdir()
+    (sd / "rfb.sock").touch()
+    (sd / "launcher.pid").write_text("1 0.0", encoding="utf-8")  # a dead launcher, not our process group
+    monkeypatch.setattr(runtime, "_X_LOCK_DIR", tmp_path / "xlocks")  # no lock file at all
+    (tmp_path / "xlocks").mkdir()
+    # argv[0] names the fake Xvnc and argv carries our socket path, exactly what launcher.sh's Xvnc shows;
+    # `tail -f` on the socket file just blocks like a server would (a multicall coreutils rejects a symlink).
+    orphan = subprocess.Popen([str(tmp_path / "Xvnc"), "-f", str(sd / "rfb.sock")], executable=shutil.which("tail"),
+                              start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    try:
+        assert runtime._reap_orphaned_server(sd) is True
+        assert _wait_until(lambda: _gone(orphan.pid)), "the lock-less orphan must be reaped, not leaked"
+        assert not (sd / "rfb.sock").exists()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(orphan.pid, 9)
+        orphan.wait()
+
+
 _SLOW_LAUNCHER = """#!/usr/bin/env bash
 # Publishes only AFTER runtime.start()'s readiness deadline has passed.
 sleep 30 &
@@ -256,6 +308,25 @@ def test_readiness_timeout_terminates_the_launch_it_gave_up_on(in_process_runtim
     assert runtime.status().running is False
     for lock in (scratch / "xlocks").glob(".X*-lock"):
         assert _gone(int(lock.read_text())), "the launch's X server must die with its launcher"
+
+
+_DYING_LAUNCHER = """#!/usr/bin/env bash
+# Xvnc refusing the number ('server already running'): the launcher exits non-zero at once.
+exit 1
+"""
+
+
+@pytest.mark.linux_only
+def test_failed_start_does_not_pin_the_profile_to_the_number_that_failed(in_process_runtime):
+    """Regression for #109941: after a launcher failure the recorded ``display`` kept naming the number, and
+    ``_pick_display`` reuses the recorded number first — so every retry picked the same occupied display and
+    the profile wedged. A failed start forgets its number; the next attempt allocates afresh."""
+    scratch = in_process_runtime
+    (scratch / "launcher.sh").write_text(_DYING_LAUNCHER, encoding="utf-8")
+    sd = runtime.state_dir()
+    with pytest.raises(RuntimeError, match="launcher exited"):
+        runtime.start(wait_seconds=5)
+    assert not (sd / "display").exists(), "a number that just failed must not be recorded for reuse"
 
 
 @pytest.mark.linux_only

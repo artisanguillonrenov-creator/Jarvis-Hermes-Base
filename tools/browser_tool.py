@@ -42,7 +42,9 @@ def _build_browser_env() -> dict:
 
     env = hermes_subprocess_env(inherit_credentials=False)
     env.update({k: os.environ[k] for k in _BROWSER_PASSTHROUGH_KEYS if k in os.environ})
-    # Headed Chromium opens on this profile's Bot Desktop when one is running (human can take it over).
+    # Headed Chromium opens on this profile's Bot Desktop when one is running (human can take it over). Pure: this
+    # builder also serves the npx cache warmer, the Chromium auto-installer and the Lightpanda engine, none of which
+    # may bring a screen up — the auto-start hook lives at the headed Chromium spawn sites (browser_tool_session).
     from tools.bot_desktop.runtime import desktop_env as _bot_desktop_env
     return _bot_desktop_env(env)
 

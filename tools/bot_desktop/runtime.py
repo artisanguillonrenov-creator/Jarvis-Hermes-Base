@@ -176,6 +176,7 @@ def _recorded_launcher_pid() -> Optional[int]:
 
 
 _X_LOCK_DIR = Path("/tmp")  # where X servers write .X<n>-lock (tests point it at a scratch dir)
+_X_UNIX_TABLE = Path("/proc/net/unix")  # the kernel's list of bound Unix sockets (tests point it at a fixture)
 
 
 def _x_lock_pid(num: int) -> Optional[int]:
@@ -185,11 +186,22 @@ def _x_lock_pid(num: int) -> Optional[int]:
         return None
 
 
+def _x_socket_bound(num: int) -> bool:
+    """A running X server keeps ``@/tmp/.X11-unix/X<n>`` (abstract namespace) bound for its whole life; the
+    kernel drops it only when the process exits. A /tmp reaper can remove the lock file under a live Xvnc,
+    and only this binding then still says the number is taken (a new server on it dies 'already running')."""
+    try:
+        lines = _X_UNIX_TABLE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(line.split()[-1].lstrip("@") == f"/tmp/.X11-unix/X{num}" for line in lines if line.strip())
+
+
 def _display_in_use(num: int) -> bool:
-    """A live X server owns ``:num``: its lock file names a running pid. A lock left by a crashed
-    server (dead pid) does not count, so the number can be reclaimed."""
+    """A live X server owns ``:num``: its lock file names a running pid, or its X11 socket is bound. A lock
+    left by a crashed server (dead pid, no socket) does not count, so the number can be reclaimed."""
     pid = _x_lock_pid(num)
-    return pid is not None and _pid_alive(pid)
+    return (pid is not None and _pid_alive(pid)) or _x_socket_bound(num)
 
 
 def _reap_orphaned_server(sd: Path) -> bool:
@@ -198,26 +210,33 @@ def _reap_orphaned_server(sd: Path) -> bool:
     ``status()`` keys on the launcher and says stopped, and a naive restart allocates a second server next
     to it and overwrites the socket path both now claim. The X lock of the recorded display names that
     server: it is ours when it sits in the dead launcher's process group or its command line binds OUR
-    socket. Kill it (group first), drop the state it left, and report whether anything was signalled."""
+    socket. When a /tmp reaper took the lock too (or the failed launch dropped ``display``), the socket path
+    on the Xvnc command line is the remaining handle — without it one X server leaks per occurrence. Kill it
+    (group first), drop the state it left, and report whether anything was signalled."""
     import psutil
+
+    def _binds_our_socket(cmdline: list) -> bool:
+        return "Xvnc" in Path(cmdline[0] if cmdline else "").name and str(sd / "rfb.sock") in cmdline
 
     recorded = _read(sd / "display")
     pid = _x_lock_pid(int(recorded)) if recorded and recorded.isdigit() else None
     if pid is None or not _pid_alive(pid):
-        return False
+        pid = next((p.pid for p in psutil.process_iter(["cmdline"]) if _binds_our_socket(p.info["cmdline"] or [])), None)
+        if pid is None:
+            return False
     launcher = _recorded_launcher_pid()
     try:
         pgid = os.getpgid(pid)  # windows-footgun: ok — Linux-only runtime (is_supported_host gates start/stop)
         cmdline = psutil.Process(pid).cmdline()
     except (ProcessLookupError, psutil.Error):
         return False
-    binds_our_socket = "Xvnc" in Path(cmdline[0] if cmdline else "").name and str(sd / "rfb.sock") in cmdline
-    if pgid != launcher and not binds_our_socket:
+    if pgid != launcher and not _binds_our_socket(cmdline):
         return False  # somebody else's server took the number after we died; never touch it
     logger.warning("Bot Desktop launcher %s is gone but its X server (pid %s) survived on :%s; reaping",
-                   launcher, pid, recorded)
+                   launcher, pid, recorded or "?")
     _kill_group_then_wait(pgid if pgid == launcher else None, pid)
-    (_X_LOCK_DIR / f".X{recorded}-lock").unlink(missing_ok=True)
+    if recorded:
+        (_X_LOCK_DIR / f".X{recorded}-lock").unlink(missing_ok=True)
     for name in ("launcher.pid", "env", "rfb.sock"):
         (sd / name).unlink(missing_ok=True)
     return True
@@ -311,10 +330,10 @@ def desktop_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 def ensure_started_for_tool() -> None:
-    """Tool-boundary hook (``computer_use`` dispatch): with ``bot_desktop.auto_start`` (opt-in, default off) a Linux
-    host that has NO display and the packages installed gets its screen started on first use, so a headless
-    gateway works the first time instead of answering "no DISPLAY is set". Failure is not an error here;
-    the tool's own "no display" diagnosis is the right message then."""
+    """Tool-boundary hook (``computer_use`` dispatch and the headed Chromium spawn sites of the browser tool): with
+    ``bot_desktop.auto_start`` (opt-in, default off) a Linux host that has NO display and the packages installed gets
+    its screen started on first use, so a headless gateway works the first time instead of answering "no DISPLAY is
+    set". Failure is not an error here; the tool's own "no display" diagnosis is the right message then."""
     if published_env() or not _should_auto_start(os.environ):
         return
     try:
@@ -411,7 +430,13 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
         if _launcher_pid() is None:
             _reap_orphaned_server(sd)
         _ALLOC_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return _spawn_and_wait(sd, wait_seconds)
+        try:
+            return _spawn_and_wait(sd, wait_seconds)
+        except RuntimeError:
+            # _pick_display reuses the recorded number first: left in place after a failed launch (e.g. Xvnc
+            # 'server already running' on it), every retry would pick the same number and the profile wedges.
+            (sd / "display").unlink(missing_ok=True)
+            raise
 
 
 def _spawn_and_wait(sd: Path, wait_seconds: float) -> DesktopStatus:
