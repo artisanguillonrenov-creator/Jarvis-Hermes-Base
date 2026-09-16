@@ -242,6 +242,69 @@ class TestCreateProfile:
         assert not any((profile_dir / "cron").iterdir())
         assert yaml.safe_load((profile_dir / "config.yaml").read_text())["model"] == "test"
 
+    @pytest.mark.parametrize("clone_kwargs", [{"clone_config": True}, {"clone_all": True}])
+    def test_clone_preserves_junctioned_external_skill(self, profile_env, monkeypatch, clone_kwargs):
+        """A Windows skill junction must remain a link, not become a second local skill.
+
+        A physical clone of this directory collides with the same ``foo`` skill
+        configured through ``skills.external_dirs`` on the next skill refresh.
+        Simulate the Windows-only reparse-point predicate so this regression is
+        covered on every platform.
+        """
+        default_home = profile_env / ".hermes"
+        external_skill = profile_env / "external-skills" / "foo"
+        external_skill.mkdir(parents=True)
+        (external_skill / "SKILL.md").write_text("# external foo\n")
+        source_skill = default_home / "skills" / "foo"
+        source_skill.mkdir(parents=True)
+        (source_skill / "SKILL.md").write_text("# flattened only before the fix\n")
+        (default_home / "config.yaml").write_text(
+            f"skills:\n  external_dirs:\n    - {external_skill.parent}\n"
+        )
+
+        original_readlink = profiles.os.readlink
+        monkeypatch.setattr(profiles, "_is_junction", lambda path: path == source_skill)
+        monkeypatch.setattr(
+            profiles.os,
+            "readlink",
+            lambda path: str(external_skill) if Path(path) == source_skill else original_readlink(path),
+        )
+
+        clone = create_profile("clone", no_alias=True, **clone_kwargs)
+        cloned_skill = clone / "skills" / "foo"
+
+        assert cloned_skill.is_symlink()
+        assert cloned_skill.resolve() == external_skill
+        assert (cloned_skill / "SKILL.md").read_text() == "# external foo\n"
+        from tools.skills_tool import _collect_skill_candidates
+        candidates = _collect_skill_candidates("foo", None, [clone / "skills", external_skill.parent])
+        assert len(candidates) == 1
+
+    @pytest.mark.parametrize("clone_kwargs", [{"clone_config": True}, {"clone_all": True}])
+    def test_clone_preserves_symlinked_external_skill(self, profile_env, clone_kwargs):
+        """A valid external skill symlink remains a single candidate after cloning."""
+        default_home = profile_env / ".hermes"
+        external_skill = profile_env / "external-skills" / "foo"
+        external_skill.mkdir(parents=True)
+        (external_skill / "SKILL.md").write_text("# external foo\n")
+        source_skill = default_home / "skills" / "foo"
+        try:
+            source_skill.symlink_to(external_skill, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"cannot create a directory symlink here: {exc}")
+        (default_home / "config.yaml").write_text(
+            f"skills:\n  external_dirs:\n    - {external_skill.parent}\n"
+        )
+
+        clone = create_profile("clone", no_alias=True, **clone_kwargs)
+        cloned_skill = clone / "skills" / "foo"
+
+        assert cloned_skill.is_symlink()
+        assert cloned_skill.resolve() == external_skill
+        from tools.skills_tool import _collect_skill_candidates
+        candidates = _collect_skill_candidates("foo", None, [clone / "skills", external_skill.parent])
+        assert len(candidates) == 1
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="special files need a POSIX filesystem")
     def test_clone_all_skips_special_files(self, profile_env):
         # A live source profile holds special files copytree cannot copy (e.g. a suffixless

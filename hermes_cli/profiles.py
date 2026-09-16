@@ -839,10 +839,82 @@ def _materialize_symlinked_files(profile_dir: Path) -> List[str]:
     return done
 
 
+def _is_junction(path: Path) -> bool:
+    """Whether *path* is a Windows directory junction or reparse-point directory."""
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    if os.name != "nt" or path.is_symlink() or not path.is_dir():
+        return False
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(os.lstat(path), "st_file_attributes", 0) & reparse_point)
+
+
+def _skill_junctions(skills_dir: Path):
+    """Yield junctions in a skills tree without descending into their targets."""
+    if _is_junction(skills_dir):
+        yield skills_dir
+        return
+    for root, dirs, _files in os.walk(skills_dir, followlinks=False):
+        junctions = [Path(root) / name for name in dirs if _is_junction(Path(root) / name)]
+        dirs[:] = [name for name in dirs if Path(root) / name not in junctions]
+        yield from junctions
+
+
+def _restore_skill_junctions(source_skills: Path, copied_skills: Path) -> None:
+    """Replace copied Windows skill junctions with directory links to their targets.
+
+    ``copytree(symlinks=True)`` preserves ordinary symlinks, but treats Windows
+    junctions as directories on some Python versions and materializes their
+    contents.  That creates a second local skill alongside ``external_dirs``.
+    If the reparse target cannot be read or linked, retain the historical copy
+    rather than making profile creation fail.
+    """
+    for source_link in _skill_junctions(source_skills):
+        try:
+            target = os.readlink(source_link)
+        except OSError:
+            continue
+        copied_link = copied_skills / source_link.relative_to(source_skills)
+        if copied_link.is_symlink() or not copied_link.is_dir():
+            continue
+        backup = copied_link.with_name(f".{copied_link.name}.junction-copy-{os.getpid()}")
+        try:
+            os.rename(copied_link, backup)
+            os.symlink(target, copied_link, target_is_directory=True)
+        except OSError:
+            # Windows installations without symlink privilege can still create
+            # a junction.  A failure here restores the historical copied tree.
+            if os.name == "nt":
+                with contextlib.suppress(OSError, subprocess.CalledProcessError):
+                    subprocess.run(
+                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(copied_link), target],
+                        check=True, capture_output=True,
+                    )
+            if not copied_link.exists():
+                os.rename(backup, copied_link)
+            elif backup.exists():
+                shutil.rmtree(backup)
+        else:
+            shutil.rmtree(backup)
+
+
+def _copy_skills_tree(source_skills: Path, copied_skills: Path) -> None:
+    """Copy skills while retaining symlinks and Windows junctions."""
+    shutil.copytree(
+        source_skills, copied_skills, symlinks=True, dirs_exist_ok=True,
+        ignore=_non_exportable_entries,
+    )
+    _restore_skill_junctions(source_skills, copied_skills)
+
+
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
     shutil.copytree(source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir))
+    source_skills = source_dir / "skills"
+    if source_skills.is_dir():
+        _restore_skill_junctions(source_skills, profile_dir / "skills")
     materialized = _materialize_symlinked_files(profile_dir)
     if materialized:
         logger.info("profile %s: materialized symlinked %s so the clone never writes through to %s",
@@ -885,10 +957,7 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path],
         _clone_file(source_dir, profile_dir, relpath)
     source_skills = source_dir / "skills"
     if source_skills.is_dir():
-        shutil.copytree(
-            source_skills, profile_dir / "skills", symlinks=True, dirs_exist_ok=True,
-            ignore=_non_exportable_entries,
-        )
+        _copy_skills_tree(source_skills, profile_dir / "skills")
     for relpath in _CLONE_SUBDIR_FILES:
         _clone_file(source_dir, profile_dir, relpath)
     if sync_imports:
