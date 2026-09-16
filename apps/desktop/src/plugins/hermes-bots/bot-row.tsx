@@ -225,7 +225,10 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
     <RowButton
       aria-label={rowTooltip}
       className={cn(
-        'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+        'group/row flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left',
+        // Named properties only (DESIGN.md Motion): color on hover, a 100ms
+        // transform lift on the face; never transition-all on a hot row.
+        'transition-[background-color] duration-100',
         'hover:bg-(--chrome-action-hover)',
         isActive && 'bg-(--ui-row-active-background)',
         // The row being dragged fades in place; the browser's drag image is
@@ -243,7 +246,12 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       }}
       onPointerEnter={warm}
     >
-      <div className={cn('shrink-0', !sourceStatus.available && 'grayscale opacity-60')}>
+      <div
+        className={cn(
+          'shrink-0 transition-transform duration-100 ease-out group-hover/row:scale-[1.06]',
+          !sourceStatus.available && 'grayscale opacity-60'
+        )}
+      >
         <BotFace
           color={avatarColor(color, bot.name)}
           image={photo ? image : null}
@@ -489,7 +497,9 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband }
     <RowButton
       aria-label={`${group}, ${members.length} bots, ${availabilityLabel}`}
       className={cn(
-        'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+        'group/row flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left',
+        // Same motion vocabulary as single-bot rows: named properties, 100ms.
+        'transition-[background-color] duration-100',
         'hover:bg-(--chrome-action-hover)',
         active && 'bg-(--ui-row-active-background)'
       )}
@@ -504,6 +514,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband }
             alt=""
             className={cn(
               'size-8 rounded-md object-cover ring-1 ring-(--ui-stroke-tertiary)',
+              'transition-transform duration-100 ease-out group-hover/row:scale-[1.06]',
               availableMembers === 0 && 'grayscale opacity-60'
             )}
             src={room.image}
@@ -512,6 +523,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband }
           <span
             className={cn(
               'flex size-8 items-center justify-center rounded-md bg-(--chrome-action-hover) text-(--ui-text-tertiary)',
+              'transition-transform duration-100 ease-out group-hover/row:scale-[1.06]',
               availableMembers === 0 && 'opacity-60'
             )}
           >
