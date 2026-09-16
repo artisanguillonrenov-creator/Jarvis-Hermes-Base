@@ -655,6 +655,40 @@ def _canonical_participant(source: SessionSource) -> Optional[str]:
 _TELEGRAM_DM_GENERAL_TOPIC_IDS = frozenset({"", "1"})
 
 
+def include_telegram_dm_thread_for(
+    source: SessionSource, *, topic_mode_enabled: bool = False,
+) -> bool:
+    """Flag for ``build_session_key``: coalesce Telegram DM suffixes unless this is a
+    topic-mode non-General lane. Non-Telegram-DM sources keep ``thread_id`` (no-op flag)."""
+    if getattr(source, "platform", None) != Platform.TELEGRAM or getattr(source, "chat_type", None) != "dm":
+        return True
+    thread_id = str(getattr(source, "thread_id", None) or "")
+    if not thread_id or thread_id in _TELEGRAM_DM_GENERAL_TOPIC_IDS:
+        return False
+    return bool(topic_mode_enabled)
+
+
+def include_telegram_dm_thread_via_store(
+    source: SessionSource, store: Optional[Any] = None, *, topic_mode_enabled: Optional[bool] = None,
+) -> bool:
+    """Same as SessionStore keying: ask the store when it can decide, else coalesce DMs.
+
+    ``topic_mode_enabled`` is used only when the store cannot return a real bool (missing,
+    mocked, or failed lookup).
+    """
+    belongs = getattr(store, "_telegram_dm_thread_belongs_in_session_key", None)
+    if callable(belongs):
+        try:
+            result = belongs(source)
+            if isinstance(result, bool):
+                return result
+        except Exception:
+            pass
+    if topic_mode_enabled is None:
+        return include_telegram_dm_thread_for(source, topic_mode_enabled=False)
+    return include_telegram_dm_thread_for(source, topic_mode_enabled=topic_mode_enabled)
+
+
 def build_session_key(
     source: SessionSource, group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False, profile: Optional[str] = None,

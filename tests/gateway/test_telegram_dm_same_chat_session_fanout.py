@@ -164,3 +164,118 @@ class TestSameChatTelegramDmDoesNotFanOut:
         e_b = store.get_or_create_session(topic_b)
         e_lobby = store.get_or_create_session(lobby)
         assert len({e_a.session_id, e_b.session_id, e_lobby.session_id}) == 3
+
+
+class TestCoalescedKeySharedAcrossAdapterUndoAndHandoff:
+    """Enough1122 review: adapter ``_active_sessions``, /undo eviction, and handoff
+    destination keys must use the same coalesced key as SessionStore."""
+
+    @pytest.mark.asyncio
+    async def test_adapter_handle_message_guard_uses_store_root(self, store):
+        from unittest.mock import AsyncMock
+
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import BasePlatformAdapter
+        from gateway.platforms.event import MessageEvent, MessageType
+
+        class _StubAdapter(BasePlatformAdapter):
+            async def connect(self, *, is_reconnect: bool = False):
+                pass
+
+            async def disconnect(self):
+                pass
+
+            async def send(self, chat_id, text, **kwargs):
+                pass
+
+            async def get_chat_info(self, chat_id):
+                return {}
+
+        adapter = _StubAdapter(PlatformConfig(enabled=True, token="test-token"), Platform.TELEGRAM)
+        adapter.set_session_store(store)
+        adapter.set_message_handler(AsyncMock())
+        started: list[str] = []
+
+        def _start(event, session_key, **_kwargs):
+            started.append(session_key)
+            adapter._active_sessions[session_key] = object()
+            return True
+
+        adapter._start_session_processing = _start
+        adapter._handle_message_while_active = AsyncMock()
+        adapter._heal_stale_session_lock = lambda _key: None
+
+        first = MessageEvent(
+            text="one", message_type=MessageType.TEXT, source=_dm(thread_id="1001"),
+        )
+        second = MessageEvent(
+            text="two", message_type=MessageType.TEXT, source=_dm(thread_id="1002"),
+        )
+        store_key = store._generate_session_key(first.source)
+        assert store_key == f"agent:main:telegram:dm:{CHAT_ID}"
+
+        await adapter.handle_message(first)
+        await adapter.handle_message(second)
+
+        assert started == [store_key]
+        adapter._handle_message_while_active.assert_awaited_once()
+        assert list(adapter._active_sessions) == [store_key]
+        assert adapter._event_session_key(first) == adapter._event_session_key(second) == store_key
+
+    @pytest.mark.asyncio
+    async def test_undo_evicts_the_store_root_not_the_suffix(self, store):
+        from gateway.platforms.event import MessageEvent, MessageType
+        from gateway.run import GatewayRunner
+
+        source = _dm(thread_id="40404")
+        entry = store.get_or_create_session(source)
+        store_key = store._generate_session_key(source)
+        assert store_key == f"agent:main:telegram:dm:{CHAT_ID}"
+        db = store._db
+        assert db is not None
+        if not db.get_messages_as_conversation(entry.session_id):
+            db.append_message(entry.session_id, "user", "q1")
+            db.append_message(entry.session_id, "assistant", "a1")
+
+        evicted: list[str] = []
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig()
+        runner.session_store = store
+        runner._async_session_store = None
+        runner._evict_cached_agent = evicted.append
+
+        await GatewayRunner._handle_undo_command(
+            runner,
+            MessageEvent(text="/undo", message_type=MessageType.TEXT, source=source),
+        )
+        assert evicted == [store_key]
+        assert not any(key.endswith(":40404") for key in evicted)
+
+    def test_handoff_destination_key_matches_store(self, store):
+        from types import SimpleNamespace
+
+        from gateway.config import PlatformConfig
+        from gateway.run import GatewayRunner
+
+        dest = SimpleNamespace(
+            source=_dm(thread_id="17585"),
+            platform=Platform.TELEGRAM,
+            handoff_config=GatewayConfig(
+                platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="test")},
+            ),
+        )
+        runner = object.__new__(GatewayRunner)
+        runner.config = dest.handoff_config
+        runner.session_store = store
+        runner._async_session_store = None
+
+        coalesced = GatewayRunner._handoff_session_key(runner, dest, None)
+        assert coalesced == store._generate_session_key(dest.source)
+        assert coalesced == f"agent:main:telegram:dm:{CHAT_ID}"
+
+        db = store._db
+        assert db is not None
+        db.enable_telegram_topic_mode(chat_id=CHAT_ID, user_id=USER_ID)
+        topic = GatewayRunner._handoff_session_key(runner, dest, None)
+        assert topic == store._generate_session_key(dest.source)
+        assert topic == f"agent:main:telegram:dm:{CHAT_ID}:17585"

@@ -2095,7 +2095,7 @@ from gateway.config import (
     ChannelOverride, Platform, GatewayConfig, PlatformConfig, _getenv, load_gateway_config)
 from gateway.session import (
     AsyncSessionStore, SessionStore, SessionSource, SessionContext, build_session_key,
-    profile_from_session_key_namespace)
+    include_telegram_dm_thread_via_store, profile_from_session_key_namespace)
 # Telegram topic routing (#22773, regression fixed #52060): a
 # ``telegram:<positive_chat_id>:<numeric_thread_id>`` cron target is ambiguous — a forum-style topic in a
 # private chat and a genuine Bot API channel Direct-Messages topic share the same shape and need OPPOSITE
@@ -3851,8 +3851,8 @@ class GatewayRunner(
             source, group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
             profile=_profile,
-            include_telegram_dm_thread=not (
-                source.platform == Platform.TELEGRAM and source.chat_type == "dm"
+            include_telegram_dm_thread=include_telegram_dm_thread_via_store(
+                source, getattr(self, "session_store", None),
             ),
         )
 

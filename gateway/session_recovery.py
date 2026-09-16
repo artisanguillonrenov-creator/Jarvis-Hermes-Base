@@ -18,9 +18,6 @@ if TYPE_CHECKING:
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.session")
 
-# Telegram private-chat General/lobby thread ids (mirrors gateway.run).
-_TELEGRAM_DM_GENERAL_TOPIC_IDS = frozenset({"", "1"})
-
 
 def _origin_json(source) -> Optional[str]:
     """``source.to_dict()`` as JSON, or None when absent/unserializable."""
@@ -117,24 +114,23 @@ class SessionRecoveryMixin:
         (topic-mode off, General/lobby, missing chat_id, DB unreadable) omits the suffix so one
         private chat cannot fan out into N concurrent sessions (#107133).
         """
-        thread_id = str(source.thread_id or "")
-        if not thread_id or thread_id in _TELEGRAM_DM_GENERAL_TOPIC_IDS:
-            return False
-        return self._telegram_dm_topic_mode_enabled(source)
+        from gateway.session import include_telegram_dm_thread_for
+        thread_id = str(getattr(source, "thread_id", None) or "")
+        topic_mode = False
+        if thread_id and thread_id not in ("", "1"):
+            topic_mode = self._telegram_dm_topic_mode_enabled(source)
+        return include_telegram_dm_thread_for(source, topic_mode_enabled=topic_mode)
 
     def _generate_session_key(self, source: SessionSource, key_source: Optional[SessionSource] = None) -> str:
         """Session key for *source* (profile from *source*; key from *key_source* if given)."""
         from gateway.session import build_session_key
         src = key_source if key_source is not None else source
-        include_telegram_dm_thread = True
-        if src.platform == Platform.TELEGRAM and src.chat_type == "dm":
-            include_telegram_dm_thread = self._telegram_dm_thread_belongs_in_session_key(src)
         return build_session_key(
             src,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
             profile=self._resolve_profile_for_key(source),
-            include_telegram_dm_thread=include_telegram_dm_thread,
+            include_telegram_dm_thread=self._telegram_dm_thread_belongs_in_session_key(src),
         )
 
     def _adopt_telegram_dm_fanout_entry(self, source: SessionSource, session_key: str) -> None:
