@@ -4501,6 +4501,14 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         sys.exit(1)
+    # A finite invocation has no human session to reopen.  Bind its durable
+    # source explicitly so a TUI/WebUI caller's context does not make it show
+    # up alongside interactive conversations.  cmd_chat passes an explicit
+    # --source through ``_single_query_session_source`` when the caller asked
+    # for a different tag.
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    source_tokens = set_session_vars(source=getattr(cli, "_single_query_session_source", None) or "tool")
     try:
         query, single_query_images = _collect_query_images(query, image)
         single_query_image_urls = _collect_kanban_task_images(single_query_images)
@@ -4542,7 +4550,10 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
         cli.chat(query, images=single_query_images or None)
         cli._print_exit_summary(clear_screen=False)
     finally:
-        _finalize_single_query(cli)
+        try:
+            _finalize_single_query(cli)
+        finally:
+            clear_session_vars(source_tokens)
 
 
 def main(
@@ -4573,6 +4584,7 @@ def main(
     output_format: str = "text",
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    session_source: str | None = None,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -4636,6 +4648,7 @@ def main(
         quiet = True
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
+    cli._single_query_session_source = session_source
 
     # Join the background worktree creation before anything consumes TERMINAL_CWD.
     # A requested worktree whose setup failed aborts: never silently run without isolation.
