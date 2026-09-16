@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { $sessionTiles } from '@/store/session-states'
 import { $toursEnabled } from '@/store/tours'
 
 import { handleServerRequest } from './server-requests'
@@ -42,6 +43,24 @@ describe('connection request routing', () => {
 })
 
 describe('preview action request routing', () => {
+  afterEach(() => {
+    $sessionTiles.set([])
+  })
+
+  it('answers a scoped action for an on-screen tile even when another session is active', async () => {
+    $sessionTiles.set([{ runtimeId: 'session-a', storedSessionId: 'stored-a' }])
+    const { respond } = deliver('preview.act', { action: 'elements', session_id: 'session-a' }, 'session-b')
+
+    await vi.waitFor(() => {
+      expect(respond).toHaveBeenCalledWith({
+        value: JSON.stringify({
+          error: 'No live page is open in the in-app browser — open one with open_preview first.',
+          success: false
+        })
+      })
+    })
+  })
+
   it('leaves a scoped action request unanswered in a window showing another session', () => {
     const { handled, respond, fail } = deliver('preview.act', { action: 'elements', session_id: 'session-a' }, 'session-b')
 
@@ -50,7 +69,7 @@ describe('preview action request routing', () => {
     expect(fail).not.toHaveBeenCalled()
   })
 
-  it('fails fast for an unscoped request with no session in view', () => {
+  it('fails fast when no session is on screen', () => {
     const { respond } = deliver('preview.act', { action: 'elements' }, null)
 
     expect(respond).toHaveBeenCalledWith({

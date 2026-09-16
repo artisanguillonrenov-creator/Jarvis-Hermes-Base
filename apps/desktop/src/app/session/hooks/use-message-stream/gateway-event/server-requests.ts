@@ -17,6 +17,8 @@ import {
   setVaultUnlockRequest
 } from '@/store/prompts'
 import { rememberServerRequest } from '@/store/server-requests'
+import { $activeSessionId } from '@/store/session'
+import { $focusedRuntimeId, $sessionTiles } from '@/store/session-states'
 import { requestScrollToBottom } from '@/store/thread-scroll'
 import { $toursEnabled } from '@/store/tours'
 
@@ -39,6 +41,12 @@ const loadPreviewEngine = () => {
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
+
+/** A preview may belong to the primary chat, the focused tree tab, or a tile. */
+const sessionIsOnScreen = (sessionId: string): boolean =>
+  sessionId === $focusedRuntimeId.get() ||
+  sessionId === $activeSessionId.get() ||
+  $sessionTiles.get().some(tile => tile.runtimeId === sessionId)
 
 /** Answer a string-valued request with a JSON-encoded result ('' = nothing / unavailable). */
 const answerValue = (request: ScopedServerRequest, result: unknown) =>
@@ -282,19 +290,19 @@ const previewRead: Handler = ({ request }) => {
   )
 }
 
-const previewAct: Handler = ({ isActiveSession, request, sessionId }) => {
+const previewAct: Handler = ({ request, sessionId }) => {
   // drive_preview tool: click/type/scroll/press inside the guest page. Active
-  // session only: a background turn must never reach into the page the user is
-  // working in (desktop AGENTS.md: offer, don't hijack). Every mounted window can
-  // observe the same request; a scoped mismatch belongs to another window, so
-  // answering here would race the owner — stay silent.
-  if (sessionId && !isActiveSession) {
+  // on-screen sessions only: a background turn must never reach into the page
+  // the user is working in (desktop AGENTS.md: offer, don't hijack). Every
+  // mounted window can observe the same request; a scoped mismatch belongs to
+  // another window, so answering here would race the owner — stay silent.
+  if (sessionId && !sessionIsOnScreen(sessionId)) {
     return
   }
 
   const p = request.params
 
-  if (!isActiveSession) {
+  if (!sessionId || !sessionIsOnScreen(sessionId)) {
     answerValue(request, {
       error: 'The in-app browser only takes actions in the session the user is looking at.',
       success: false
