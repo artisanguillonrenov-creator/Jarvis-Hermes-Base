@@ -2409,6 +2409,10 @@ export interface Translations {
       moveFailed: string
       moveNoFolder: string
       moveNoProjects: string
+      moveToBranch: string
+      movedToBranch: (name: string) => string
+      moveBranchFailed: string
+      moveNoBranches: string
       reveal: string
       copyPath: string
       removeFromSidebar: string
