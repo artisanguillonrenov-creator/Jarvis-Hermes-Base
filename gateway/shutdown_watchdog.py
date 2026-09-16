@@ -123,6 +123,7 @@ def start_loop_liveness_watchdog(
                 continue
             if stop_event.is_set():
                 return
+            _mark_loop_unresponsive_quietly()
             with contextlib.suppress(Exception):
                 logger.critical(
                     "Gateway event loop missed %d consecutive liveness probes; dumping all thread "
@@ -150,6 +151,13 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
     with contextlib.suppress(Exception):
         from gateway.lifecycle_ledger import mark_exited
         mark_exited(exit_code, reason=reason)
+
+
+def _mark_loop_unresponsive_quietly() -> None:
+    """Make the watchdog's terminal observation visible before it restarts the process."""
+    with contextlib.suppress(Exception):
+        from gateway.status import write_runtime_status
+        write_runtime_status(gateway_state="degraded", exit_reason="loop_liveness_watchdog")
 
 
 def _process_hermes_home() -> Path:

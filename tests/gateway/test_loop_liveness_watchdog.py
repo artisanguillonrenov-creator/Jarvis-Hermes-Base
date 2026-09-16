@@ -156,6 +156,37 @@ def test_loop_liveness_watchdog_stop_after_first_recheck_skips_final_actions():
     hard_exit.assert_not_called()
 
 
+def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
+    """A frozen loop must not leave ``gateway_state.json`` claiming running."""
+    loop = MagicMock(spec=asyncio.AbstractEventLoop)
+    hard_exit_called = threading.Event()
+    exit_codes = []
+    handle_ref = {}
+
+    def fake_exit(code: int) -> None:
+        exit_codes.append(code)
+        handle_ref["handle"].stop()
+        hard_exit_called.set()
+
+    with (
+        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback"),
+        patch("gateway.shutdown_watchdog.os._exit", side_effect=fake_exit),
+        patch("gateway.status.write_runtime_status") as write_status,
+    ):
+        handle = start_loop_liveness_watchdog(
+            loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=1
+        )
+        assert handle is not None
+        handle_ref["handle"] = handle
+        assert hard_exit_called.wait(timeout=2.0), "watchdog did not reach its restart exit"
+        handle.join(timeout=2.0)
+
+    assert exit_codes == [75]
+    write_status.assert_called_once_with(
+        gateway_state="degraded", exit_reason="loop_liveness_watchdog"
+    )
+
+
 def test_gateway_config_loop_watchdog_round_trip():
     """loop_watchdog is a config.yaml knob: default on, nested-gateway form honored."""
     from gateway.config import GatewayConfig
