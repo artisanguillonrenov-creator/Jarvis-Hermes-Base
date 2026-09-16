@@ -423,6 +423,40 @@ def _run_post_turn_followups(
             _enqueue_prompt(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
+    # A model-call limit is a turn boundary, not task completion. Continue
+    # through the normal synthesized-turn path instead of waiting for the
+    # user to send a nudge (which previously became the turn that finally
+    # triggered preflight compression).
+    _turn_boundary_followup = _plan_turn_boundary_continue(session, result)
+    if _turn_boundary_followup:
+        with session["history_lock"]:
+            if session.get("running"):
+                return
+            session["running"] = True
+        try:
+            _emit(
+                "status.update",
+                sid,
+                {"kind": "process", "text": "Continuing unfinished turn…"},
+            )
+            _emit("message.start", sid)
+            _run_prompt_submit(
+                rid,
+                sid,
+                session,
+                _turn_boundary_followup,
+                display_kind="auto_continue",
+            )
+        except Exception as _cont_exc:
+            print(
+                f"[tui_gateway] turn-boundary continuation failed: "
+                f"{type(_cont_exc).__name__}: {_cont_exc}",
+                file=sys.stderr,
+            )
+            with session["history_lock"]:
+                session["running"] = False
+        return
+
     if goal_followup:
         with session["history_lock"]:
             if session.get("running"):
@@ -856,6 +890,8 @@ def _run_prompt_submit(
     if admitted is None:
         return False
     images, agent = admitted
+    if display_kind != "auto_continue":
+        session.pop(_TURN_BOUNDARY_CONTINUE_ATTEMPTS_KEY, None)
     # The ONE INFO record proving a prompt was accepted by THIS process; ties ui sid,
     # session_key and the agent's live session_id together.  No prompt content is logged.
     _turn_started_monotonic = time.monotonic()
