@@ -147,7 +147,7 @@ def _same_as_active_turn_authorization(session: dict, authorization) -> bool:
         return active is None or not active.is_personal
     if active is None:
         return not authorization.is_personal
-    return authorization.same_credential(active)
+    return authorization.same_principal(active)
 
 
 _ANY_ACTIVE_AUTHORIZATION = object()
@@ -203,7 +203,7 @@ def _enqueue_prompt(
     }
     existing = session.get("queued_prompt")
     existing_authorization = existing.get("turn_authorization") if existing else None
-    same_authorization = authorization.same_credential(
+    same_authorization = authorization.same_principal(
         existing_authorization or TurnAuthorization.from_raw(None)
     )
     if (existing and same_authorization and text_only and not turn_author and isinstance(existing.get("text"), str)
@@ -235,7 +235,7 @@ def _sanitize_queued_entry_vs_inflight_user(
         (active_authorization is None and not entry_authorization.is_personal)
         or (
             active_authorization is not None
-            and entry_authorization.same_credential(active_authorization)
+            and entry_authorization.same_principal(active_authorization)
         )
     ) if entry_authorization is not None else (
         active_authorization is None or not active_authorization.is_personal

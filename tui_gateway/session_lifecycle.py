@@ -438,7 +438,7 @@ def _interrupt_session_turn(
                     expected_person_authorization is None
                     or not expected_person_authorization.has_token
                     or expected_person_authorization.is_expired
-                    or not authorization.same_credential(expected_person_authorization)
+                    or not authorization.same_principal(expected_person_authorization)
                 ):
                     return None
         should_interrupt = bool(session.get("running"))

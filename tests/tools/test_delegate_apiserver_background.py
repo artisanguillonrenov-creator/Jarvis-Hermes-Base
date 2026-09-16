@@ -178,7 +178,9 @@ def test_real_background_delegate_task_drops_parent_turn_authorization(monkeypat
         session_history_delivery="1",
         async_delivery=False,
     )
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("parent-person", expires_at=time.time() + 3600))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw(
+        "parent-person", expires_at=time.time() + 3600, principal_id="a" * 64
+    ))
     try:
         out = dt.delegate_task(
             goal="detached authority boundary",
@@ -216,7 +218,9 @@ def test_async_delegation_record_context_retains_only_blocked_personal_marker(mo
     async_delegation._records.clear()
 
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("record-secret", expires_at=time.time() + 3600)
+        TurnAuthorization.from_raw(
+            "record-secret", expires_at=time.time() + 3600, principal_id="a" * 64
+        )
     )
     try:
         handle = async_delegation.dispatch_async_delegation(

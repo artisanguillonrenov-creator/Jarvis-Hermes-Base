@@ -2492,7 +2492,7 @@
     },
     {
       "name": "prompt.submit",
-      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide both per-turn bearer and Unix expiry metadata.",
+      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide per-turn bearer, Unix expiry, and stable principal metadata.",
       "params": [
         {
           "name": "params",
@@ -21924,6 +21924,19 @@
             "default": null,
             "description": "Unix expiry timestamp for the per-person bearer; required when the bearer is present.",
             "title": "Fizko Person Access Token Expires At"
+          },
+          "_fizko_person_principal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted stable opaque owner id; required with the per-person bearer and expiry.",
+            "title": "Fizko Person Principal Id"
           }
         },
         "required": [
@@ -25859,6 +25872,19 @@
             "default": null,
             "description": "Unix expiry timestamp; required and must still be valid for a personal interrupt.",
             "title": "Fizko Person Access Token Expires At"
+          },
+          "_fizko_person_principal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted stable opaque owner id matching the active personal turn.",
+            "title": "Fizko Person Principal Id"
           }
         },
         "required": [

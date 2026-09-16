@@ -9,11 +9,54 @@ from types import SimpleNamespace
 import pytest
 
 
+PERSON_A = "a" * 64
+PERSON_B = "b" * 64
+
+
+def test_person_token_requires_stable_principal_id():
+    from agent.turn_authorization import TurnAuthorization
+
+    with pytest.raises(ValueError, match="principal id is required"):
+        TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600)
+
+
+@pytest.mark.parametrize("principal_id", ["short", "A" * 64, 123])
+def test_person_token_rejects_malformed_principal_id(principal_id):
+    from agent.turn_authorization import TurnAuthorization
+
+    with pytest.raises(ValueError, match="SHA-256 identifier"):
+        TurnAuthorization.from_raw(
+            "person-token",
+            expires_at=time.time() + 3600,
+            principal_id=principal_id,
+        )
+
+
+def test_stable_principal_owns_rotated_credentials_without_sharing_bearer():
+    from agent.turn_authorization import TurnAuthorization
+
+    first = TurnAuthorization.from_raw(
+        "person-token-t1", expires_at=time.time() + 3600, principal_id=PERSON_A
+    )
+    reconnected = TurnAuthorization.from_raw(
+        "person-token-t2", expires_at=time.time() + 3600, principal_id=PERSON_A
+    )
+    stranger = TurnAuthorization.from_raw(
+        "person-token-t3", expires_at=time.time() + 3600, principal_id=PERSON_B
+    )
+
+    assert first.same_principal(reconnected)
+    assert not first.same_credential(reconnected)
+    assert not first.same_principal(stranger)
+
+
 def test_turn_authorization_holder_is_opaque_redacted_and_nonserializable():
     from agent.turn_authorization import TurnAuthorization
 
     token = "person-token.sentinel-123"
-    holder = TurnAuthorization.from_raw(token, expires_at=time.time() + 3600)
+    holder = TurnAuthorization.from_raw(
+        token, expires_at=time.time() + 3600, principal_id=PERSON_A
+    )
 
     assert token not in repr(holder)
     assert token not in str(holder)
@@ -37,7 +80,9 @@ def test_person_token_rejects_invalid_expiry(expires_at):
     from agent.turn_authorization import TurnAuthorization
 
     with pytest.raises(ValueError, match="Unix timestamp"):
-        TurnAuthorization.from_raw("person-token", expires_at=expires_at)
+        TurnAuthorization.from_raw(
+            "person-token", expires_at=expires_at, principal_id=PERSON_A
+        )
 
 
 def test_personal_descendant_scope_is_blocked_not_static_fallback():
@@ -50,7 +95,9 @@ def test_personal_descendant_scope_is_blocked_not_static_fallback():
     )
 
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600)
+        TurnAuthorization.from_raw(
+            "person-token", expires_at=time.time() + 3600, principal_id=PERSON_A
+        )
     )
     try:
         assert current_fizko_authorization_state()[0] is True
@@ -69,7 +116,9 @@ def test_expired_person_authorization_remains_personal_but_has_no_header():
         set_current_turn_authorization,
     )
 
-    holder = TurnAuthorization.from_raw("expired-person", expires_at=1.0)
+    holder = TurnAuthorization.from_raw(
+        "expired-person", expires_at=1.0, principal_id=PERSON_A
+    )
     token = set_current_turn_authorization(holder)
     try:
         assert holder.has_token is True
@@ -104,7 +153,9 @@ def test_real_delegate_child_worker_does_not_inherit_parent_turn_authorization(m
         seen.append(current_fizko_authorization_header()),
     )[-1] or {"final_response": "done", "completed": True}
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600)
+        TurnAuthorization.from_raw(
+            "person-token", expires_at=time.time() + 3600, principal_id=PERSON_A
+        )
     )
     try:
         result, error, deferred = run.await_child()
@@ -143,7 +194,11 @@ def test_detached_process_reader_does_not_retain_parent_turn_authorization(monke
         finished.set()
 
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("detached-parent-token", expires_at=time.time() + 3600)
+        TurnAuthorization.from_raw(
+            "detached-parent-token",
+            expires_at=time.time() + 3600,
+            principal_id=PERSON_A,
+        )
     )
     try:
         registry._track_started(session, reader, "test-detached-reader")

@@ -14,11 +14,13 @@ from agent.turn_authorization import (
 from tui_gateway import server as srv
 
 
-def _authorization(raw, *, expires_at=None):
+def _authorization(raw, *, expires_at=None, principal_id="a" * 64):
     if raw is None:
         return TurnAuthorization.from_raw(None)
     return TurnAuthorization.from_raw(
-        raw, expires_at=time.time() + 3600 if expires_at is None else expires_at
+        raw,
+        expires_at=time.time() + 3600 if expires_at is None else expires_at,
+        principal_id=principal_id,
     )
 
 
@@ -91,6 +93,7 @@ def test_prompt_submit_rejects_expired_person_token():
             "text": "hello",
             "_fizko_person_access_token": "person-token",
             "_fizko_person_access_token_expires_at": time.time() - 1,
+            "_fizko_person_principal_id": "a" * 64,
         },
     )
 
@@ -110,6 +113,7 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
                 "text": "hello",
                 "_fizko_person_access_token": "person-token",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "a" * 64,
             },
         )
     finally:
@@ -262,6 +266,7 @@ def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monk
         "text": "hello",
         "_fizko_person_access_token": secret,
         "_fizko_person_access_token_expires_at": time.time() + 3600,
+        "_fizko_person_principal_id": "a" * 64,
     }
     monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
     monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
@@ -313,6 +318,7 @@ def test_different_person_cannot_redirect_or_interrupt_the_active_turn(monkeypat
                 "text": "do not steer active",
                 "_fizko_person_access_token": "incoming-person",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "b" * 64,
             },
         )
     finally:
@@ -428,6 +434,7 @@ def test_queued_prompts_keep_distinct_person_authorizations(monkeypatch):
                     "queued": True,
                     "_fizko_person_access_token": person,
                     "_fizko_person_access_token_expires_at": time.time() + 3600,
+                    "_fizko_person_principal_id": ("b" if person == "person-b" else "c") * 64,
                 },
             )
             assert response["result"] == {"status": "queued"}
@@ -465,6 +472,7 @@ def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
                 "queued": True,
                 "_fizko_person_access_token": "person-b",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "b" * 64,
             },
         )
     finally:
@@ -553,6 +561,7 @@ def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypat
                     "text": "same person correction",
                     "_fizko_person_access_token": "queued-person",
                     "_fizko_person_access_token_expires_at": time.time() + 3600,
+                    "_fizko_person_principal_id": "a" * 64,
                 },
             ),
             name="concurrent-submit",
@@ -722,6 +731,7 @@ def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypa
                 "session_id": "sid",
                 "_fizko_person_access_token": "active-person",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "a" * 64,
             },
         )
     finally:
@@ -731,6 +741,78 @@ def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypa
     assert calls["interrupt"] == [True]
     assert session["running"] is False
     assert "_active_turn_authorization" not in session
+
+
+def test_reconnected_person_can_interrupt_active_turn_with_rotated_bearer(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_active_turn_authorization"] = _authorization(
+        "person-token-t1", principal_id="a" * 64
+    )
+    try:
+        response = srv._methods["session.interrupt"](
+            "r",
+            {
+                "session_id": "sid",
+                "_fizko_person_access_token": "person-token-t2",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "a" * 64,
+            },
+        )
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["result"]["status"] == "interrupted"
+    assert calls["interrupt"] == [True]
+    assert session["running"] is False
+
+
+def test_different_person_principal_cannot_interrupt_active_turn(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_active_turn_authorization"] = _authorization(
+        "person-token-t1", principal_id="a" * 64
+    )
+    try:
+        response = srv._methods["session.interrupt"](
+            "r",
+            {
+                "session_id": "sid",
+                "_fizko_person_access_token": "person-token-t2",
+                "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "b" * 64,
+            },
+        )
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["error"]["code"] == 4125
+    assert calls["interrupt"] == []
+    assert session["running"] is True
+
+
+def test_reconnected_person_queues_rotated_bearer_behind_owned_active_turn(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_active_turn_authorization"] = _authorization(
+        "person-token-t1", principal_id="a" * 64
+    )
+    monkeypatch.setattr(srv, "_load_busy_input_mode", lambda: "queue")
+    try:
+        params = {
+            "session_id": "sid",
+            "text": "run after reconnect",
+            "_fizko_person_access_token": "person-token-t2",
+            "_fizko_person_access_token_expires_at": time.time() + 3600,
+            "_fizko_person_principal_id": "a" * 64,
+        }
+        response = srv._methods["prompt.submit"]("r", params)
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["result"] == {"status": "queued"}
+    queued = session["queued_prompt"]["turn_authorization"]
+    assert queued.same_principal(session["_active_turn_authorization"])
+    assert not queued.same_credential(session["_active_turn_authorization"])
+    assert params == {"session_id": "sid", "text": "run after reconnect"}
+    assert calls == {"steer": [], "redirect": [], "interrupt": []}
 
 
 def test_interrupt_keeps_personal_fence_until_live_worker_settles(monkeypatch):
@@ -744,6 +826,7 @@ def test_interrupt_keeps_personal_fence_until_live_worker_settles(monkeypatch):
                 "session_id": "sid",
                 "_fizko_person_access_token": "active-person",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "a" * 64,
             },
         )
         assert response["result"]["status"] == "interrupted"
@@ -770,6 +853,7 @@ def test_expired_person_authorization_cannot_interrupt(monkeypatch):
                 "session_id": "sid",
                 "_fizko_person_access_token": "active-person",
                 "_fizko_person_access_token_expires_at": time.time() - 1,
+                "_fizko_person_principal_id": "a" * 64,
             },
         )
     finally:
@@ -789,6 +873,7 @@ def test_direct_session_interrupt_rejects_different_person_authorization(monkeyp
                 "session_id": "sid",
                 "_fizko_person_access_token": "different-person",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
+                "_fizko_person_principal_id": "b" * 64,
             },
         )
     finally:

@@ -151,7 +151,9 @@ def test_mcp_handler_captures_person_header_before_crossing_to_mcp_loop(monkeypa
 
     import contextvars
 
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw(
+        "person-token", expires_at=time.time() + 3600, principal_id="a" * 64
+    ))
     try:
         result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
     finally:
@@ -209,7 +211,7 @@ def test_expired_person_token_blocks_instead_of_falling_back_to_profile_authoriz
     )
 
     context_token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("expired-person", expires_at=1.0)
+        TurnAuthorization.from_raw("expired-person", expires_at=1.0, principal_id="a" * 64)
     )
     try:
         result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
@@ -281,7 +283,7 @@ def test_person_token_is_revalidated_immediately_before_transport_dispatch(monke
     monkeypatch.setattr(mcp_tool_handlers, "_call_tool_racing_stdio_death", fake_racing)
     monkeypatch.setattr(mcp_tool_handlers, "_dispatch", delayed_dispatch)
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("short-lived", expires_at=101.0)
+        TurnAuthorization.from_raw("short-lived", expires_at=101.0, principal_id="a" * 64)
     )
     try:
         result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})
@@ -310,7 +312,9 @@ def test_neighbor_mcp_is_not_given_per_call_headers(monkeypatch):
         "_run_on_mcp_loop",
         lambda call, timeout: asyncio.run(contextvars.Context().run(call)),
     )
-    token = set_current_turn_authorization(TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600))
+    token = set_current_turn_authorization(TurnAuthorization.from_raw(
+        "person-token", expires_at=time.time() + 3600, principal_id="a" * 64
+    ))
     try:
         mcp_tool_handlers._make_tool_handler("neighbor", "ping", 10)({})
     finally:
@@ -371,7 +375,9 @@ def test_concurrent_handlers_keep_person_headers_isolated(monkeypatch):
     handler = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)
 
     def invoke(person):
-        token = set_current_turn_authorization(TurnAuthorization.from_raw(person, expires_at=time.time() + 3600))
+        token = set_current_turn_authorization(TurnAuthorization.from_raw(
+            person, expires_at=time.time() + 3600, principal_id="a" * 64
+        ))
         try:
             handler({})
         finally:
@@ -406,7 +412,9 @@ def test_retry_revalidates_the_same_local_person_authorization(monkeypatch):
             asyncio.run(call())
         except RuntimeError:
             ambient = set_current_turn_authorization(
-                TurnAuthorization.from_raw("changed-ambient", expires_at=200.0)
+                TurnAuthorization.from_raw(
+                    "changed-ambient", expires_at=200.0, principal_id="b" * 64
+                )
             )
             try:
                 try:
@@ -425,7 +433,9 @@ def test_retry_revalidates_the_same_local_person_authorization(monkeypatch):
     monkeypatch.setattr(mcp_tool_handlers, "_call_tool_racing_stdio_death", fake_racing)
     monkeypatch.setattr(mcp_tool_handlers, "_dispatch", retry_dispatch)
     token = set_current_turn_authorization(
-        TurnAuthorization.from_raw("original-person", expires_at=101.0)
+        TurnAuthorization.from_raw(
+            "original-person", expires_at=101.0, principal_id="a" * 64
+        )
     )
     try:
         result = mcp_tool_handlers._make_tool_handler("fizko", "whoami", 10)({})

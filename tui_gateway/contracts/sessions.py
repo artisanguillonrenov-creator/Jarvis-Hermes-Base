@@ -524,6 +524,11 @@ class SessionInterruptParams(SessionParams):
         alias="_fizko_person_access_token_expires_at",
         description="Unix expiry timestamp; required and must still be valid for a personal interrupt.",
     )
+    fizko_person_principal_id: str | None = Field(
+        default=None,
+        alias="_fizko_person_principal_id",
+        description="Trusted stable opaque owner id matching the active personal turn.",
+    )
 
 
 class InterruptStatus(WireEnum):
