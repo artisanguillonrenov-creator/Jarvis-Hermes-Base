@@ -25,6 +25,8 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli import update_lock as _update_lock
+
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
@@ -139,6 +141,8 @@ class DispatchResult:
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
+    skipped_update_in_progress: bool = False
+    """True when a live updater owns the install venv and the whole tick paused."""
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -166,6 +170,8 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
+        if res.skipped_update_in_progress:
+            counts["update_in_progress"] = counts.get("update_in_progress", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
@@ -1728,6 +1734,15 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
     """
+    # The Desktop writes this shared marker before it tears down its backend
+    # and gateways. Reclaiming that killed worker, promoting, or spawning here
+    # would immediately recreate the venv lock the updater is waiting to
+    # release (#113548). Both embedded and standalone dispatchers enter here.
+    if _update_lock.read_live_update() is not None:
+        result = DispatchResult(skipped_update_in_progress=True)
+        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+        return result
+
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
             conn,

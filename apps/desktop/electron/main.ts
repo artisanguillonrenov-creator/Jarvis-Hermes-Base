@@ -409,7 +409,7 @@ import {
 } from './translucency'
 import { branchTipApiUrl, cacheIsFresh, compareApiUrl, githubRepoSlug, parseCompare } from './update-api-check'
 import { waitForUpdateClearance } from './update-gate'
-import { readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
+import { clearUpdateMarkerIfOwned, readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
 import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
 import {
   collectRelaunchArgs,
@@ -3986,6 +3986,7 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
   }
 
   updateInFlight = true
+  let updateGateOwned = false
 
   try {
     const updater = resolveUpdaterBinary()
@@ -4094,6 +4095,15 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
         return { ok: false, error: message }
       }
     }
+
+    // `updateInFlight` only covers this Electron process. Publish the shared
+    // gate before backend/gateway teardown so an external Kanban dispatcher
+    // cannot reclaim the worker we kill and immediately spawn a replacement
+    // from this venv, re-locking the Windows shim (#113548). The detached
+    // updater adopts this marker later without resetting its acquisition time.
+    const updateStartedAt = Math.floor(Date.now() / 1000)
+    writeUpdateMarker(HERMES_HOME, process.pid, { startedAt: updateStartedAt })
+    updateGateOwned = true
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -4204,8 +4214,6 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     let child
 
     if (scriptHandoff) {
-      const updateStartedAt = Math.floor(Date.now() / 1000)
-
       // A bare detached+hidden powershell spawn silently dies before -File
       // processing (console-subsystem init failure — see
       // wrapHandoffForDetachedConsole). Route through `cmd start` so the
@@ -4245,6 +4253,7 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
       // update_lock.py's process-ancestry rule; no mtime heuristics needed.
       if (Number.isInteger(child.pid)) {
         writeUpdateMarker(HERMES_HOME, child.pid, { startedAt: updateStartedAt })
+        updateGateOwned = false
       }
 
       rememberLog(
@@ -4279,6 +4288,7 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
       // its own marker moments later.
       if (Number.isInteger(child.pid) && stagedUpdaterSupportsPrewrittenMarker(updater)) {
         writeUpdateMarker(HERMES_HOME, child.pid)
+        updateGateOwned = false
       } else if (Number.isInteger(child.pid)) {
         rememberLog(
           `[updates] skipping marker pre-write: staged updater predates self-adopt (${updater}); it would refuse its own claim`
@@ -4330,6 +4340,9 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
 
     return { ok: true, handedOff: true, updater }
   } finally {
+    if (updateGateOwned) {
+      clearUpdateMarkerIfOwned(HERMES_HOME, process.pid)
+    }
     updateInFlight = false
   }
 }

@@ -64,6 +64,36 @@ def test_held_lock_skips_the_tick_without_writes(conn):
     assert spawn_calls == [], "spawn_fn must not run while the tick is locked out"
 
 
+def test_live_update_marker_pauses_reclaim_promotion_and_spawn(conn, monkeypatch):
+    """An updater owns the install, so a killed worker must not be requeued.
+
+    The same dispatch_once path is used by the gateway-embedded dispatcher and
+    ``hermes kanban dispatch``.  Holding the shared update marker here must
+    therefore leave both a stale running claim and ready work untouched.
+    """
+    ready_id = kb.create_task(conn, title="ready", assignee="w")
+    running_id = kb.create_task(conn, title="update-killed worker", assignee="w")
+    assert kb.claim_task(conn, running_id) is not None
+    conn.execute("UPDATE tasks SET claim_expires = 0 WHERE id = ?", (running_id,))
+    conn.commit()
+
+    monkeypatch.setattr(kbd._update_lock, "read_live_update", lambda: object())
+    spawn_calls: list[str] = []
+
+    result = kbd.dispatch_once(
+        conn,
+        spawn_fn=lambda task, *_args, **_kwargs: spawn_calls.append(task.id) or 4242,
+    )
+
+    assert result.skipped_update_in_progress is True
+    assert result.reclaimed == 0
+    assert result.promoted == 0
+    assert result.spawned == []
+    assert spawn_calls == []
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (ready_id,)).fetchone()[0] == "ready"
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (running_id,)).fetchone()[0] == "running"
+
+
 
 
 def test_lock_is_board_scoped(conn):
@@ -77,5 +107,4 @@ def test_lock_is_board_scoped(conn):
         assert held_a is True
         with kbc._dispatch_tick_lock(db_other) as held_b:
             assert held_b is True, "a lock on a different board must be independent"
-
 
