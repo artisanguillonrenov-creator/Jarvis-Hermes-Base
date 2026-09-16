@@ -89,7 +89,7 @@ Claude Code presents up to two confirmation dialogs on first launch. You MUST ha
 ```
 **Handling:** `tmux send-keys -t <session> Enter` — default selection is correct.
 
-### Dialog 2: Bypass Permissions Warning (only with --dangerously-skip-permissions)
+### Dialog 2: Bypass Permissions Warning (explicit opt-in only)
 ```
 ❯ 1. No, exit                    ← DEFAULT (WRONG choice!)
   2. Yes, I accept
@@ -101,20 +101,37 @@ tmux send-keys -t <session> Down && sleep 0.3 && tmux send-keys -t <session> Ent
 
 ### Robust Dialog Handling Pattern
 ```
-# Launch with permissions bypass
-terminal(command="tmux send-keys -t claude-work 'claude --dangerously-skip-permissions \"your task\"' Enter")
+# Launch with normal permission prompts (the default)
+terminal(command="tmux send-keys -t claude-work 'claude \"your task\"' Enter")
 
 # Handle trust dialog (Enter for default "Yes")
 terminal(command="sleep 4 && tmux send-keys -t claude-work Enter")
 
-# Handle permissions dialog (Down then Enter for "Yes, I accept")
-terminal(command="sleep 3 && tmux send-keys -t claude-work Down && sleep 0.3 && tmux send-keys -t claude-work Enter")
+# Inspect each permission request, then explicitly approve or decline it.
+# Do not send a blanket confirmation for permission prompts.
+terminal(command="sleep 3 && tmux capture-pane -t claude-work -p -S -30")
 
 # Now wait for Claude to work
 terminal(command="sleep 15 && tmux capture-pane -t claude-work -p -S -60")
 ```
 
-**Note:** After the first trust acceptance for a directory, the trust dialog won't appear again. Only the permissions dialog recurs each time you use `--dangerously-skip-permissions`.
+For an explicitly reviewed automation run, `--permission-mode acceptEdits` is a narrower
+option: it can accept file edits while leaving shell and other permission requests under the
+configured permission rules. Use it only in a dedicated worktree after reviewing the task and
+the allowed tools:
+
+```
+terminal(command="tmux send-keys -t claude-work 'claude --permission-mode acceptEdits \"your task\"' Enter")
+```
+
+`--dangerously-skip-permissions` is a separate, high-risk opt-in. It suppresses permission
+prompts for filesystem, shell, and network actions. Use it only for a throwaway worktree or
+isolated container when the operator has deliberately accepted that exposure; never use it as
+the default automation flow. If it is selected, Dialog 2 requires `Down` then `Enter` to accept
+the warning.
+
+**Note:** After the first trust acceptance for a directory, the trust dialog won't appear again.
+The bypass warning recurs only when `--dangerously-skip-permissions` is explicitly selected.
 
 ## CLI Subcommands
 
