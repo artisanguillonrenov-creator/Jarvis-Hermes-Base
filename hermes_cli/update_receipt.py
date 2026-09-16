@@ -55,6 +55,7 @@ class UpdateReceipt:
     """Collects the observable facts of one ``hermes update`` run."""
 
     def __init__(self) -> None:
+        self.path: Optional[Path] = None
         self.data: dict[str, Any] = {
             "schema": 1, "started_at": _utc_now_iso(), "finished_at": None,
             "argv": list(sys.argv), "pid": os.getpid(),
@@ -122,11 +123,28 @@ def _receipt_dir() -> Path:
     return get_hermes_home() / "logs" / "update_receipts"
 
 
+def _persist_receipt(receipt: UpdateReceipt) -> Path:
+    """Write the current receipt state and refresh the stable latest pointer."""
+    directory = _receipt_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    if receipt.path is None:
+        receipt.path = directory / f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
+    body = json.dumps(receipt.data, indent=2, default=str)
+    receipt.path.write_text(body, encoding="utf-8")
+    with suppress(OSError):  # stable pointer for the dashboard/desktop
+        (directory / "latest.json").write_text(body, encoding="utf-8")
+    return receipt.path
+
+
 def begin_update_receipt() -> None:
-    """Start recording a new update receipt. Never raises."""
+    """Start and persist a running update receipt. Never raises."""
     global _current
     try:
         _current = UpdateReceipt()
+        # The post-pull process may lose this module object's singleton before
+        # finalization. A durable running record is preferable to making the
+        # entire update invisible; later record/finalize calls overwrite it.
+        _persist_receipt(_current)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not start update receipt: %s", exc)
         _current = None
@@ -137,6 +155,7 @@ def _record(method: str, what: str, *args: Any, **kwargs: Any) -> None:
     try:
         if _current is not None:
             getattr(_current, method)(*args, **kwargs)
+            _persist_receipt(_current)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not record %s: %s", what, exc)
 
@@ -173,14 +192,8 @@ def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason
             receipt.data["stop_reason"] = stop_reason
         if fleet is not None:
             receipt.data["fleet"] = fleet
-        directory = _receipt_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-        body = json.dumps(receipt.data, indent=2, default=str)
-        path.write_text(body, encoding="utf-8")
-        with suppress(OSError):  # stable pointer for the dashboard/desktop
-            (directory / "latest.json").write_text(body, encoding="utf-8")
-        _prune_old_receipts(directory)
+        path = _persist_receipt(receipt)
+        _prune_old_receipts(path.parent)
         return path
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not write update receipt: %s", exc)
