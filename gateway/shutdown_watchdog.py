@@ -134,6 +134,14 @@ def start_loop_liveness_watchdog(
                 logger.debug("Loop liveness faulthandler dump failed", exc_info=True)
             if stop_event.is_set():
                 return
+            # This has to be the final status writer before the irreversible exit.
+            # The loop may recover long enough to publish its ordinary "running"
+            # status while diagnostics are being collected above.
+            _mark_loop_unresponsive_quietly()
+            # The status write is synchronous and can itself overlap a graceful
+            # shutdown. Preserve the late-stop-wins contract before any exit.
+            if stop_event.is_set():
+                return
             _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
             os._exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
@@ -150,6 +158,17 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
     with contextlib.suppress(Exception):
         from gateway.lifecycle_ledger import mark_exited
         mark_exited(exit_code, reason=reason)
+
+
+def _mark_loop_unresponsive_quietly() -> None:
+    """Make the watchdog's terminal observation visible before it restarts the process."""
+    with contextlib.suppress(Exception):
+        from gateway.status import write_runtime_status
+        write_runtime_status(
+            gateway_state="degraded",
+            exit_reason="loop_liveness_watchdog",
+            restart_requested=True,
+        )
 
 
 def _process_hermes_home() -> Path:
