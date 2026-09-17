@@ -14,6 +14,7 @@ Usage:
   python google_api.py calendar create --summary "Meeting" --start DATETIME --end DATETIME
   python google_api.py drive search "budget report" [--max 10]
   python google_api.py contacts list [--max 20]
+  python google_api.py contacts birthdays [--days 30] [--max 100] [--name NAME]
   python google_api.py sheets get SHEET_ID RANGE
   python google_api.py sheets update SHEET_ID RANGE --values '[[...]]'
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
@@ -27,7 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -909,6 +910,89 @@ def contacts_list(args):
     print(json.dumps(contacts, indent=2, ensure_ascii=False))
 
 
+def _today() -> date:
+    """Return today's local calendar date (kept separate for deterministic tests)."""
+    return date.today()
+
+
+def _people_connections_page(page_token: str | None = None) -> dict:
+    """Fetch one People API connections page through the active backend."""
+    params = {
+        "resourceName": "people/me",
+        "pageSize": 1000,
+        "personFields": "names,birthdays",
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    if _gws_binary():
+        return _run_gws(["people", "people", "connections", "list"], params=params)
+    service = build_service("people", "v1")
+    return service.people().connections().list(**params).execute()
+
+
+def _birthday_date(value: dict, year: int) -> date:
+    """Project a birthday onto a year; common years observe Feb 29 on Feb 28."""
+    month, day = value["month"], value["day"]
+    if month == 2 and day == 29:
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return date(year, 2, 28)
+    return date(year, month, day)
+
+
+def _format_birthday(value: dict) -> str:
+    suffix = str(value["year"]) if value.get("year") else ""
+    return f"{value['day']:02d}.{value['month']:02d}.{suffix}"
+
+
+def _next_birthday(value: dict, today: date) -> date:
+    upcoming = _birthday_date(value, today.year)
+    return upcoming if upcoming >= today else _birthday_date(value, today.year + 1)
+
+
+def contacts_birthdays(args):
+    """List upcoming People API birthdays, sorted by their next occurrence."""
+    today = _today()
+    page_token = None
+    birthdays = []
+    name_filter = args.name.casefold()
+
+    while True:
+        page = _people_connections_page(page_token)
+        for person in page.get("connections", []):
+            names = person.get("names", [])
+            name = names[0].get("displayName", "") if names else ""
+            if name_filter and name_filter not in name.casefold():
+                continue
+            for birthday in person.get("birthdays", []):
+                value = birthday.get("date", {})
+                if not value.get("month") or not value.get("day"):
+                    continue
+                try:
+                    next_date = _next_birthday(value, today)
+                except ValueError:
+                    continue
+                days_until = (next_date - today).days
+                if days_until > args.days:
+                    continue
+                entry = {
+                    "name": name,
+                    "birthday": _format_birthday(value),
+                    "nextDate": next_date.isoformat(),
+                    "daysUntil": days_until,
+                }
+                if value.get("year"):
+                    entry["turningAge"] = next_date.year - value["year"]
+                birthdays.append(entry)
+        page_token = page.get("nextPageToken")
+        if not page_token:
+            break
+
+    birthdays.sort(key=lambda entry: (entry["nextDate"], entry["name"].casefold()))
+    print(json.dumps(birthdays[:args.max], indent=2, ensure_ascii=False))
+
+
 # =========================================================================
 # Sheets
 # =========================================================================
@@ -1268,6 +1352,12 @@ def main():
     p = con_sub.add_parser("list")
     p.add_argument("--max", type=int, default=50)
     p.set_defaults(func=contacts_list)
+
+    p = con_sub.add_parser("birthdays", help="List upcoming contact birthdays from People API")
+    p.add_argument("--days", type=int, default=30, help="Include birthdays in the next N days")
+    p.add_argument("--max", type=int, default=100, help="Maximum results to return")
+    p.add_argument("--name", default="", help="Only include contacts whose name contains this text")
+    p.set_defaults(func=contacts_birthdays)
 
     # --- Sheets ---
     sh = sub.add_parser("sheets")

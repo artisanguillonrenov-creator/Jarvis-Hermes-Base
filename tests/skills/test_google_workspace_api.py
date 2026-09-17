@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -269,3 +269,111 @@ def test_docs_append_carries_tab_id_and_refuses_ambiguous_writes(api_module, mon
         api_module.docs_append(types.SimpleNamespace(doc_id="doc1", text="more", tab=None))
     err = json.loads(capsys.readouterr().err)
     assert "tabs" in err and len(err["tabs"]) == 3
+
+
+def test_contacts_birthdays_pages_sorts_projects_and_filters(api_module, monkeypatch, capsys):
+    """Birthday reads include the People fields, page through results, and project dates."""
+    pages = [
+        {
+            "connections": [
+                {"names": [{"displayName": "Leap"}], "birthdays": [{"date": {"month": 2, "day": 29, "year": 2000}}]},
+                {"names": [{"displayName": "No date"}], "birthdays": [{"date": {"year": 1980}}]},
+            ],
+            "nextPageToken": "page-2",
+        },
+        {
+            "connections": [
+                {"names": [{"displayName": "Soon"}], "birthdays": [{"date": {"month": 3, "day": 2}}]},
+                {"names": [{"displayName": "Later"}], "birthdays": [{"date": {"month": 3, "day": 31}}]},
+            ],
+        },
+    ]
+    calls = []
+
+    def run_gws(parts, *, params=None, body=None):
+        calls.append((parts, params))
+        return pages.pop(0)
+
+    monkeypatch.setattr(api_module, "_run_gws", run_gws)
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=10, name=""))
+    result = json.loads(capsys.readouterr().out)
+
+    assert [entry["name"] for entry in result] == ["Soon", "Later"]
+    assert result[0] == {"name": "Soon", "birthday": "02.03.", "nextDate": "2025-03-02", "daysUntil": 1}
+    assert calls[0][0] == ["people", "people", "connections", "list"]
+    assert calls[0][1]["personFields"] == "names,birthdays"
+    assert calls[0][1]["pageSize"] == 1000
+    assert calls[1][1]["pageToken"] == "page-2"
+
+
+def test_contacts_birthdays_name_filter_and_leap_day(api_module, monkeypatch, capsys):
+    """Named queries are case-insensitive and Feb 29 falls on Feb 28 in a common year."""
+    monkeypatch.setattr(
+        api_module,
+        "_people_connections_page",
+        lambda page_token=None: {
+            "connections": [
+                {"names": [{"displayName": "Ada Lovelace"}], "birthdays": [{"date": {"month": 2, "day": 29, "year": 1815}}]},
+                {"names": [{"displayName": "Grace Hopper"}], "birthdays": [{"date": {"month": 12, "day": 9}}]},
+            ],
+        },
+    )
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 2, 27))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=2, max=10, name="ada"))
+    result = json.loads(capsys.readouterr().out)
+
+    assert result == [{
+        "name": "Ada Lovelace", "birthday": "29.02.1815", "nextDate": "2025-02-28",
+        "daysUntil": 1, "turningAge": 210,
+    }]
+
+
+def test_contacts_birthdays_uses_python_people_client(api_module, monkeypatch, capsys):
+    """The fallback backend requests the same birthday fields."""
+    calls = []
+
+    class Connections:
+        def list(self, **params):
+            calls.append(params)
+            return MagicMock(execute=lambda: {
+                "connections": [{
+                    "names": [{"displayName": "Pat"}],
+                    "birthdays": [{"date": {"month": 6, "day": 1}}],
+                }],
+            })
+
+    service = MagicMock()
+    service.people.return_value.connections.return_value = Connections()
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+    monkeypatch.setattr(api_module, "build_service", lambda service_name, version: service)
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 6, 1))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=0, max=1, name=""))
+
+    assert json.loads(capsys.readouterr().out)[0]["name"] == "Pat"
+    assert calls == [{
+        "resourceName": "people/me", "pageSize": 1000, "personFields": "names,birthdays",
+    }]
+
+
+def test_contacts_birthdays_returns_empty_list_for_no_connections(api_module, monkeypatch, capsys):
+    monkeypatch.setattr(api_module, "_people_connections_page", lambda page_token=None: {})
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=100, name=""))
+
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_contacts_birthdays_parser_wires_horizon_limit_and_name(api_module, monkeypatch):
+    """The CLI exposes explicit upcoming and named-contact birthday options."""
+    captured = {}
+    monkeypatch.setattr(api_module, "contacts_birthdays", lambda args: captured.update(vars(args)))
+    with patch.object(sys, "argv", ["google_api.py", "contacts", "birthdays", "--days", "7", "--max", "3", "--name", "Ada"]):
+        api_module.main()
+
+    assert captured["days"] == 7
+    assert captured["max"] == 3
+    assert captured["name"] == "Ada"
