@@ -117,6 +117,23 @@ def test_source_url_empty_for_unknown_source_without_identifier(mod):
     assert mod._source_url("mystery", "", {}) == ""
 
 
+def test_canonical_install_identifier_qualifies_clawhub_once(mod):
+    assert mod._canonical_install_identifier("clawhub", "humanizer") == "clawhub/humanizer"
+    assert mod._canonical_install_identifier("clawhub", "clawhub/humanizer") == "clawhub/humanizer"
+    assert mod._install_command("clawhub", "humanizer", "humanizer") == "hermes skills install clawhub/humanizer"
+
+
+def test_local_skills_publish_exact_install_identifiers(mod):
+    skills = mod.extract_local_skills()
+    bundled = next(skill for skill in skills if skill["source"] == "built-in")
+    optional = next(skill for skill in skills if skill["source"] == "optional")
+
+    assert bundled["installIdentifier"].startswith("NousResearch/hermes-agent/skills/")
+    assert optional["installIdentifier"].startswith("official/")
+    assert bundled["installCmd"].endswith(bundled["installIdentifier"])
+    assert optional["installCmd"].endswith(optional["installIdentifier"])
+
+
 # --------------------------------------------------------------------------
 # _guess_category
 # --------------------------------------------------------------------------
