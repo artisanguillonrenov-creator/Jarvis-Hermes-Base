@@ -148,10 +148,22 @@ def _receipt_reports_stale_runtime(expected_sha: str | None = None) -> bool:
 
 
 def _receipt_owed_gateways() -> set[tuple[str, str]] | None:
-    """``(kind, profile)`` identities ``latest.json`` owes a current successor.
+    """``(kind, profile)`` gateway identities ``latest.json`` owes a current successor.
 
-    Empty when the receipt records no runtimes; ``None`` when any recorded runtime is one
-    the gateway matrix cannot vouch for (serve/dashboard, unknown profile).
+    Empty when the receipt records no gateways; ``None`` when a recorded runtime identifies no
+    gateway the matrix could ever match (a missing/``unknown`` profile).
+
+    A recorded serve/dashboard is **skipped** rather than vetoing: the gateway matrix can never
+    vouch for it either way, and nothing in this module can settle it, so treating it as an
+    unidentifiable gateway obligation leaves the warning permanently armed on a provably current
+    fleet. Its own lifecycle is reconciled separately (``runtime_outcomes``, the dashboard-respawn
+    path); neither ``_marker_only_restart_obsolete()`` nor ``_live_fleet_covers_receipt()`` owes
+    or settles it, and both ask only the gateway question.
+
+    See #107402/#107817: a deferred ``hermes update --no-gateway-restart`` records the managed
+    dashboard in ``plan.runtimes`` (and a run from inside the gateway's own tree can also freeze a
+    stale fleet sample into the receipt), which used to arm the pending-restart warning forever
+    after every gateway was current.
     """
     from hermes_cli.update_receipt import read_latest_receipt
 
@@ -164,8 +176,10 @@ def _receipt_owed_gateways() -> set[tuple[str, str]] | None:
         if not isinstance(entry, dict):
             return None
         kind = entry.get("kind", default_kind)
+        if kind != "gateway":
+            continue
         profile = entry.get("profile")
-        if kind != "gateway" or not profile or profile == "unknown":
+        if not profile or profile == "unknown":
             return None
         owed.add((kind, profile))
     return owed
