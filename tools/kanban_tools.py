@@ -448,9 +448,18 @@ def heartbeat_current_worker_from_env() -> bool:
     _auto_heartbeat_last_attempt = now
     try:
         from hermes_cli import kanban_db_dispatch as kbd
+        # The beat itself stays unguarded (starving it gets a live worker reclaimed); IDENTITY
+        # does not. ``set_current_session_id`` writes HERMES_SESSION_ID into the PROCESS env
+        # for every non-delegated agent built here, so a cron job fired in-process from this
+        # worker (tests/cron/test_cron_kanban_env_isolation.py) leaves its own id behind.
+        # Stamping that would latch a foreign session under first-write-wins, and a wrong
+        # link is worse than a missing one — so the stamp rides the dispatcher-owned guard.
+        stamp = (None if _is_delegated_child_context() or not _is_dispatcher_owned_worker()
+                 else _stamp_worker_session_metadata(tid, None))
         with _board(None, quiet_close=True) as (kb, conn):
             ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
-                   (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
+                   (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid),
+                                           "metadata": stamp}))
             for fn, kwargs in ops:
                 op = fn.__name__
                 try:
@@ -725,7 +734,8 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         # claimer covers locally-driven workers that bypassed the dispatcher.
         kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
         ok = kbd.heartbeat_worker(
-            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
+            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid),
+            metadata=_stamp_worker_session_metadata(tid, None))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
         return _ok(task_id=tid)
 
