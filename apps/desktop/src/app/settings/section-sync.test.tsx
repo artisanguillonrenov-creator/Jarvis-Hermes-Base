@@ -1,18 +1,19 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SectionSync as SectionSyncType } from './section-sync'
 
 const saveHermesConfig = vi.fn()
+const profiles = atom([
+  { name: 'default', is_default: true },
+  { name: 'research', is_default: false },
+  { name: 'review', is_default: false }
+])
 
 vi.mock('@/hermes', () => ({ saveHermesConfig }))
 vi.mock('@/store/profile', () => ({
-  $profiles: atom([
-    { name: 'default', is_default: true },
-    { name: 'research', is_default: false },
-    { name: 'review', is_default: false }
-  ]),
+  $profiles: profiles,
   normalizeProfileKey: (name?: string) => name?.trim() || 'default'
 }))
 vi.mock('@/i18n', () => ({
@@ -38,6 +39,11 @@ vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() 
 let SectionSync: typeof SectionSyncType
 
 beforeEach(async () => {
+  profiles.set([
+    { name: 'default', is_default: true },
+    { name: 'research', is_default: false },
+    { name: 'review', is_default: false }
+  ])
   vi.resetModules()
   ;({ SectionSync } = await import('./section-sync'))
   saveHermesConfig.mockReset()
@@ -75,5 +81,38 @@ describe('SectionSync', () => {
 
     await waitFor(() => expect(saveHermesConfig).toHaveBeenCalledTimes(2))
     expect(screen.getByText('Could not sync this section.')).toBeTruthy()
+  })
+
+  it('does not write to a target removed while the selector is open', async () => {
+    saveHermesConfig.mockResolvedValue({ ok: true })
+
+    render(<SectionSync fields={['agent.model']} profile="default" source={{ agent: { model: 'Hermes-4' } }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sync section' }))
+
+    act(() => profiles.set([
+      { name: 'default', is_default: true },
+      { name: 'research', is_default: false }
+    ]))
+
+    await waitFor(() => expect(screen.queryByLabelText('review')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to selected profiles' }))
+
+    await waitFor(() => expect(saveHermesConfig).toHaveBeenCalledWith({ agent: { model: 'Hermes-4' } }, 'research'))
+    expect(saveHermesConfig).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconciles a removed target before Apply even before the selector rerenders', async () => {
+    saveHermesConfig.mockResolvedValue({ ok: true })
+
+    render(<SectionSync fields={['agent.model']} profile="default" source={{ agent: { model: 'Hermes-4' } }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sync section' }))
+    act(() => profiles.set([
+      { name: 'default', is_default: true },
+      { name: 'research', is_default: false }
+    ]))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to selected profiles' }))
+
+    await waitFor(() => expect(saveHermesConfig).toHaveBeenCalledWith({ agent: { model: 'Hermes-4' } }, 'research'))
+    expect(saveHermesConfig).toHaveBeenCalledTimes(1)
   })
 })

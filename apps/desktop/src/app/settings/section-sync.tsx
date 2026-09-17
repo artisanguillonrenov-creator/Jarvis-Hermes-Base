@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { saveHermesConfig } from '@/hermes'
@@ -41,6 +41,16 @@ export function SectionSync({ fields, profile, source }: SectionSyncProps) {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    const currentTargets = new Set(targets.map(target => target.name))
+
+    setSelected(previous => new Set([...previous].filter(target => currentTargets.has(target))))
+  }, [open, targets])
+
   if (targets.length === 0 || fields.length === 0) {
     return null
   }
@@ -60,7 +70,10 @@ export function SectionSync({ fields, profile, source }: SectionSyncProps) {
   }
 
   const sync = async () => {
-    if (selected.size === 0) {
+    const targetNames = new Set(targets.map(target => target.name))
+    const activeSelected = [...selected].filter(target => targetNames.has(target))
+
+    if (activeSelected.length === 0) {
       setError(copy.noTargets)
 
       return
@@ -71,7 +84,7 @@ export function SectionSync({ fields, profile, source }: SectionSyncProps) {
     const patch = sectionPatch(source, fields)
 
     const results = await Promise.allSettled(
-      [...selected].map(async target => {
+      activeSelected.map(async target => {
         const result = await saveHermesConfig(patch, target)
 
         if (!result.ok) {
