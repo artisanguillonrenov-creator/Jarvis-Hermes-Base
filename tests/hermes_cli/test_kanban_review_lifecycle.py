@@ -548,6 +548,65 @@ def test_dispatch_text_and_daemon_stuck_warning_name_guard_reason(
     assert "Last tick held back: active_pr=1, memory_pressure=elevated." in err
 
 
+def test_changes_requested_reuses_existing_pr_workspace(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reviewer rejection must resume the same task despite its open PR URL."""
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    pr_comment = "Opened https://github.com/example/repo/pull/123 for review."
+    workspace = kanban_home / "existing-worktree"
+    workspace.mkdir()
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="repair existing PR",
+            assignee="implementer",
+            workspace_kind="dir",
+            workspace_path=str(workspace),
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        kb.add_comment(conn, task_id, author="implementer", body=pr_comment)
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="PR ready",
+            reviewer="reviewer",
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+        changed, assignee = kb.request_changes(
+            conn,
+            task_id,
+            reason="Fix the failing invariant.",
+            expected_run_id=review.current_run_id,
+        )
+        assert changed is True
+        assert assignee == "implementer"
+
+        spawned_calls: list[tuple[str, str, str]] = []
+
+        def spawn(task, resolved_workspace):
+            spawned_calls.append((task.id, task.assignee, resolved_workspace))
+            return os.getpid()
+
+        assert kbd.check_respawn_guard(conn, task_id) is None
+        result = kbd.dispatch_once(conn, spawn_fn=spawn)
+        second = kbd.dispatch_once(conn, spawn_fn=spawn)
+        task = kb.get_task(conn, task_id)
+
+    assert result.spawned == [(task_id, "implementer", str(workspace))]
+    assert spawned_calls == [(task_id, "implementer", str(workspace))]
+    assert second.spawned == []
+    assert task is not None
+    assert task.status == "running"
+    assert task.workspace_path == str(workspace)
+
+
 def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
