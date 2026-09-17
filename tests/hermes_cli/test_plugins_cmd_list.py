@@ -57,6 +57,56 @@ def test_cmd_list_plain_compact_output(monkeypatch, capsys):
     assert "Search" not in out  # plain mode stays compact, no descriptions
 
 
+@pytest.mark.parametrize(
+    ("live_catalog", "expected_removed"),
+    [
+        (None, False),
+        ({"entries": [], "removed": [{"name": "pulled-plugin", "reason": "security review"}]}, True),
+    ],
+)
+def test_cmd_list_fetches_live_catalog_once_for_all_removed_annotations(
+    monkeypatch, capsys, tmp_path, live_catalog, expected_removed
+):
+    """A failed (or successful) HTTP lookup is shared by every list row."""
+    import httpx
+    from hermes_cli import plugin_catalog as pc
+
+    entries = [
+        (f"plugin-{index}", "1.0", "", "user", tmp_path / str(index), f"plugin-{index}")
+        for index in range(3)
+    ]
+    entries[1] = ("pulled-plugin", "1.0", "", "user", tmp_path / "pulled", "pulled-plugin")
+    calls = 0
+
+    class FakeResponse:
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return live_catalog
+
+    def fake_get(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if live_catalog is None:
+            raise httpx.ConnectError("catalog offline")
+        return FakeResponse()
+
+    monkeypatch.setattr(plugins_cmd, "_discover_all_plugins", lambda: entries)
+    monkeypatch.setattr(plugins_cmd, "_get_enabled_set", set)
+    monkeypatch.setattr(plugins_cmd, "_get_disabled_set", set)
+    monkeypatch.setattr(pc, "_live_cache_path", lambda: tmp_path / "cache" / "plugin-catalog.json")
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    plugins_cmd.cmd_list(_args(json=True))
+
+    assert calls == 1
+    rows = json.loads(capsys.readouterr().out)
+    assert bool(rows[1]["removed"]) is expected_removed
+
+
 def test_discover_all_plugins_includes_entrypoint_plugins(monkeypatch, tmp_path):
     bundled_dir = tmp_path / "bundled"
     user_dir = tmp_path / "user"

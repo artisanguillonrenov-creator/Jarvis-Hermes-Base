@@ -1430,11 +1430,12 @@ def cmd_list(args: Any | None = None) -> None:
     # Source shows catalog provenance (``catalog:<tier>@<sha8>``) or a ``--ref`` pin
     # (``git pinned@<sha8>``) so a team can eyeball that everyone runs the same commit.
     pins = _read_install_metadata()
+    removed_annotations = catalog.removed_annotations([(name, dir_path) for name, *_rest, dir_path, _key in entries])
     rows = [
         (name, _plugin_status(name, enabled, disabled, key=key), str(version), description,
          catalog.catalog_annotation(_dir) or _pin_annotation(name, pins) or source,
-         catalog.removed_annotation(name, _dir))
-        for name, version, description, source, _dir, key in entries
+         removed)
+        for (name, version, description, source, _dir, key), removed in zip(entries, removed_annotations)
     ]
 
     if getattr(args, "json", False):
