@@ -1373,10 +1373,15 @@ def start() -> None:
         return
 
     if not is_task_registered() and not is_startup_entry_installed():
-        from hermes_cli.setup import prompt_yes_no
+        from hermes_cli.setup import is_noninteractive, prompt_yes_no
 
         print("✗ Gateway service is not installed")
-        if not prompt_yes_no("  Install it now so the gateway starts on login?", True):
+        # A redirected stdin cannot confirm installing login persistence. Keep the
+        # interactive [Y/n] default, but fail closed when input is unavailable.
+        interactive_stdin = not is_noninteractive() and bool(
+            getattr(sys.stdin, "isatty", lambda: False)()
+        )
+        if not prompt_yes_no("  Install it now so the gateway starts on login?", interactive_stdin):
             print("  Run: hermes gateway install")
             return
         install(force=False)
