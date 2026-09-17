@@ -90,3 +90,40 @@ def test_requested_mcp_server_with_tools_runs(tmp_path):
 
     assert agent_built is True
     assert success is True and error is None
+
+
+def test_requested_mcp_server_parked_after_connection_runs(tmp_path):
+    """A parked server self-probes after a transient outage, so cron must not persist a config block."""
+    import tools.mcp_tool as mcp_tool
+    from cron.scheduler_preflight import _empty_requested_mcp_toolsets
+
+    task = MagicMock()
+    task.session = None
+    task._was_parked = True
+    task._ever_connected = True
+    task._task.done.return_value = False
+    with patch.dict(mcp_tool._servers, {"notion": task}, clear=False), \
+         patch("toolsets.resolve_toolset", return_value=None):
+        assert _empty_requested_mcp_toolsets(
+            _job(enabled_toolsets=["terminal", "notion"]),
+            {"mcp_servers": {"notion": {}}},
+        ) is None
+
+
+def test_requested_mcp_server_parked_before_any_connection_still_blocks():
+    """A permanently invalid initial setup is not made fail-open merely because its task parked."""
+    import tools.mcp_tool as mcp_tool
+    from cron.scheduler_preflight import _empty_requested_mcp_toolsets
+
+    task = MagicMock()
+    task.session = None
+    task._was_parked = True
+    task._ever_connected = False
+    task._error = ValueError("invalid MCP endpoint")
+    task._task.done.return_value = False
+    with patch.dict(mcp_tool._servers, {"notion": task}, clear=False), \
+         patch("toolsets.resolve_toolset", return_value=None):
+        assert _empty_requested_mcp_toolsets(
+            _job(enabled_toolsets=["terminal", "notion"]),
+            {"mcp_servers": {"notion": {}}},
+        ) is not None

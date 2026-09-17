@@ -312,6 +312,33 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
     return None
 
 
+def _mcp_server_is_recovering(name: str) -> bool:
+    """Whether *name* is a live MCP task parked after a recoverable outage.
+
+    A parked task owns its reconnect loop and will self-probe. It is materially different from
+    a configured name that was never started for this profile (or failed permanently): the former
+    can recover without changing cron configuration, while the latter still needs the existing
+    fail-closed preflight verdict.
+    """
+    try:
+        from tools import mcp_tool
+        from tools.mcp_tool_scope import _resolve_server_key
+
+        with mcp_tool._lock:
+            server = mcp_tool._servers.get(_resolve_server_key(name))
+            task = getattr(server, "_task", None)
+            if (server is None or getattr(server, "session", None) is not None
+                    or task is None or task.done() or not getattr(server, "_was_parked", False)):
+                return False
+            if getattr(server, "_ever_connected", False):
+                return True
+            error = getattr(server, "_error", None)
+        return error is not None and _is_transient_provider_resolve_error(error)
+    except Exception:
+        logger.debug("cron MCP recovery state unavailable for %s", name, exc_info=True)
+        return False
+
+
 def _empty_requested_mcp_toolsets(job: dict, cfg: dict) -> Optional[str]:
     """Reason when an MCP server the job's own ``enabled_toolsets`` names resolves to zero tools.
 
@@ -327,6 +354,7 @@ def _empty_requested_mcp_toolsets(job: dict, cfg: dict) -> Optional[str]:
     from toolsets import resolve_toolset
     missing = [name for name in requested
                if name in enabled_mcp_server_names(cfg) and not resolve_toolset(name)]
+    missing = [name for name in missing if not _mcp_server_is_recovering(name)]
     if not missing:
         return None
     # The reason is what the operator reads in the gateway log and the alert. It must say the
