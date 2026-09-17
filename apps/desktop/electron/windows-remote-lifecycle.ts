@@ -63,7 +63,7 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
     '$python=[IO.Path]::Combine([IO.Path]::GetDirectoryName($hermes), "python.exe")',
     'Assert-NoReparse $python $false',
     '[ordered]@{os="Windows";arch=$env:PROCESSOR_ARCHITECTURE;hermesHome=$hermesHome;hermesPath=$hermes;python=$python}|ConvertTo-Json -Compress'
-  ].join(';')
+  ].join('\n')
 
   return JSON.parse((await ssh.exec(powerShellCommand(script))).trim())
 }
@@ -127,7 +127,7 @@ public static class HermesMarkerNoFollow {
     '}',
     '}}catch [IO.FileNotFoundException]{$result="CLEAR"}catch{$result="UNCERTAIN"}finally{if($memory){$memory.Dispose()};if($stream){$stream.Dispose()}}',
     'Write-Output $result'
-  ].join(';')
+  ].join('\n')
 
   return powerShellCommand(script)
 }

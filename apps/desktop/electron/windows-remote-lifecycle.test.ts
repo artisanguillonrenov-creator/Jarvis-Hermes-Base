@@ -71,6 +71,30 @@ test('PowerShell transport uses UTF-16LE encoded commands and literal escaping',
   assert.match(powerShellCommand('Write-Output ok'), /^powershell\.exe -NoProfile -NonInteractive .* -EncodedCommand /)
 })
 
+test('Windows probe scripts keep try and catch in one PowerShell statement', async () => {
+  let runtimeProbe = ''
+  await probeWindowsRemote(
+    sshWith(async command => {
+      runtimeProbe = Buffer.from(command.split(' ').at(-1) || '', 'base64').toString('utf16le')
+      return JSON.stringify({ os: 'Windows' })
+    })
+  )
+
+  let markerProbe = ''
+  await assertWindowsRemoteInstallUpdateClear(
+    sshWith(async command => {
+      markerProbe = Buffer.from(command.split(' ').at(-1) || '', 'base64').toString('utf16le')
+      return 'CLEAR'
+    }),
+    'C:\\Users\\alice\\.hermes'
+  )
+
+  for (const script of [runtimeProbe, markerProbe]) {
+    assert.doesNotMatch(script, /};catch/)
+    assert.match(script, /}\ncatch(?:\s|\[)/)
+  }
+})
+
 test('Windows relaunch gate refuses live and uncertain markers before executing the remote runtime', async () => {
   for (const observation of ['LIVE:4242', 'UNCERTAIN']) {
     const scripts: string[] = []
