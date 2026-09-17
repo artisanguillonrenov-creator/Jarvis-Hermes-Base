@@ -2393,6 +2393,7 @@ export interface Translations {
     pinned: string
     sessions: string
     cronJobs: string
+    kanbanSessions: string
     groupAriaGrouped: string
     groupAriaUngrouped: string
     showProjects: string
