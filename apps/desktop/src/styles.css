@@ -2257,6 +2257,14 @@ button[data-slot='aui_msg-reactions']:not([data-reacted])[data-state='open'] {
   pointer-events: auto;
 }
 
+/* The reaction picker is portaled above this row. Keep its footer alive while
+   the pointer travels from the hovered message into that separate surface;
+   otherwise the anchor becomes inert before the picker can receive a click. */
+[data-slot='aui_msg-actions'][data-reaction-picker-open] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* Failed-turn error card actions (Retry · Switch provider · Open logs ·
    Copy diagnostics) — compact pill buttons tinted to the card's destructive
    palette. Stylesheet-owned so the CopyButton inline appearance picks the
