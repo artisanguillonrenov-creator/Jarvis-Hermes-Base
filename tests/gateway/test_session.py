@@ -457,6 +457,29 @@ class TestLoadTranscriptDBOnly:
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 
+    def test_conditional_switch_preserves_concurrently_replaced_route(self, tmp_path):
+        """A late async completion must not overwrite a route reset after its lookup."""
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        store._db = None
+        store._loaded = True
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="chat-1",
+            chat_type="dm",
+            user_id="user-1",
+        )
+        stale_entry = store.get_or_create_session(source)
+        replacement = store.reset_session(stale_entry.session_key)
+
+        switched = store.switch_session_if_current(
+            stale_entry.session_key, stale_entry.session_id, "pinned-session"
+        )
+
+        assert switched is None
+        assert store.lookup_by_session_key(stale_entry.session_key) is replacement
+
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
         from hermes_state import SessionDB
 
@@ -1657,5 +1680,4 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
 

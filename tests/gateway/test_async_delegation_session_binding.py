@@ -85,6 +85,9 @@ class TestGatewayPinningFailsClosed:
         runner._session_db = db
         runner.session_store = MagicMock()
         runner.session_store.switch_session = MagicMock(return_value=switched_entry)
+        runner.session_store.switch_session_if_current = MagicMock(
+            return_value=switched_entry
+        )
         runner.session_store.advance_compression_session = MagicMock(
             return_value=switched_entry
         )
@@ -94,6 +97,7 @@ class TestGatewayPinningFailsClosed:
     @staticmethod
     def _assert_no_route_change(runner):
         getattr(runner.session_store, "switch_session").assert_not_called()
+        getattr(runner.session_store, "switch_session_if_current").assert_not_called()
         getattr(
             runner.session_store, "advance_compression_session"
         ).assert_not_called()
@@ -113,9 +117,61 @@ class TestGatewayPinningFailsClosed:
         )
 
         assert resolved is pinned
-        getattr(runner.session_store, "switch_session").assert_called_once_with(
-            current.session_key, "sess_live"
+        getattr(runner.session_store, "switch_session_if_current").assert_called_once_with(
+            current.session_key, "sess_current", "sess_live"
         )
+
+    @pytest.mark.asyncio
+    async def test_non_compression_lookup_invalidation_does_not_rebind_route(self):
+        """A route invalidated after lookup must win over a late completion."""
+        current = self._entry("sess_current")
+        runner = self._make_runner(
+            {"sess_live": {"id": "sess_live", "ended_at": None}},
+        )
+        runner.session_store.switch_session_if_current.return_value = None
+
+        resolved = await runner._resolve_async_delegation_session(current, "sess_live")
+
+        assert resolved is None
+        getattr(runner.session_store, "switch_session_if_current").assert_called_once_with(
+            current.session_key, "sess_current", "sess_live"
+        )
+        getattr(runner.session_store, "switch_session").assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_compression_concurrent_route_replacement_is_preserved(self):
+        """A replacement selected while the parent lookup is pending must not be overwritten."""
+        current = self._entry("sess_current")
+        runner = self._make_runner(
+            {"sess_live": {"id": "sess_live", "ended_at": None}},
+        )
+        runner.session_store.switch_session_if_current.return_value = None
+
+        resolved = await runner._resolve_async_delegation_session(current, "sess_live")
+
+        assert resolved is None
+        getattr(runner.session_store, "switch_session_if_current").assert_called_once_with(
+            current.session_key, "sess_current", "sess_live"
+        )
+
+    @pytest.mark.asyncio
+    async def test_revoked_run_generation_does_not_repin_unchanged_route(self):
+        """/stop can revoke a turn without changing its routing entry."""
+        current = self._entry("sess_current")
+        pinned = self._entry("sess_live")
+        runner = self._make_runner(
+            {"sess_live": {"id": "sess_live", "ended_at": None}},
+            switched_entry=pinned,
+        )
+        runner._is_session_run_current = MagicMock(return_value=False)
+
+        resolved = await runner._resolve_async_delegation_session(
+            current, "sess_live", run_generation=41,
+        )
+
+        assert resolved is None
+        runner._is_session_run_current.assert_called_once_with(current.session_key, 41)
+        getattr(runner.session_store, "switch_session_if_current").assert_not_called()
 
     @pytest.mark.asyncio
     async def test_non_compression_ended_parent_drops(self):
