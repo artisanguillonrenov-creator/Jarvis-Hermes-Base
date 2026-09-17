@@ -395,6 +395,20 @@ class TestOutcomeBookkeeping:
         assert self._outcome(run_env) == "delivered"
         assert alerted == ["inc-b1"], "delivered failure ping must mark incident alerted"
 
+    def test_unresolved_failure_target_remains_retryable(self, run_env, monkeypatch):
+        """An origin-only job with no target has not alerted an operator yet."""
+        alerted = []
+        monkeypatch.setattr(s, "_mark_incident_alerted", alerted.append)
+        monkeypatch.setattr(
+            s, "_upsert_incident_for_failure", lambda *_a, **_kw: (False, "inc-retry")
+        )
+        monkeypatch.setattr(s, "run_job", _failing_run_job())
+
+        s.run_one_job({"id": "b1retry", "name": "scout", "deliver": "origin"})
+
+        assert self._outcome(run_env) == "not_configured"
+        assert alerted == [], "a missing destination must not suppress the next failure alert"
+
     def test_success_outcome_still_reads_deliver_lane(self, run_env, monkeypatch):
         """Success bookkeeping is untouched: fd set, success delivers to
         deliver and records 'delivered'."""
