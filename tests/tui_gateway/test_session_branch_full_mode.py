@@ -76,6 +76,9 @@ def _branch(monkeypatch, tmp_path, *, params, history=None):
         def set_session_title(self, _key, _title):
             return True
 
+        def set_auto_title(self, _key, _title, *, source):
+            return True
+
         def get_session(self, key):
             return {"id": key, "cwd": str(tmp_path)}
 
@@ -245,6 +248,12 @@ def test_seed_branch_row_persists_tool_bindings(monkeypatch, tmp_path):
 
         def set_session_title(self, *_args, **_kwargs):
             return True
+
+        def set_auto_title(self, *_args, **_kwargs):
+            return True
+
+        def delete_session(self, *_args, **_kwargs):
+            return None
 
     class _DbCtx:
         def __enter__(self):
