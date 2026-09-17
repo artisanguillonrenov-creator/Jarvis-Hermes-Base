@@ -65,6 +65,7 @@ import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 import { CapabilityTabs, type CapabilityView } from './capability-tabs'
 import { McpTab } from './mcp-tab'
 import { PluginActions, PluginsTab } from './plugins-tab'
+import { COMPACT_SCOPE_CONTENT_CLASS, COMPACT_SCOPE_TRIGGER_CLASS, rosterScopeLabel } from './scope-label'
 import { SkillCatalog } from './skill-catalog'
 import { $skillsSortDesc, $toolsetsSortDesc } from './store'
 import { UpdateSkillsButton } from './update-skills-button'
@@ -698,16 +699,17 @@ export function SkillsView({
   // Scope-selector rows. Multi-connection desktops list every reachable
   // (connection, profile) agent from the union roster — the selected profile
   // is configured ON ITS OWN GATEWAY. Otherwise the legacy per-profile list.
+    // Plugins uses a compact profile selector (truncate + viewport-capped
+  // content) so long roster labels do not widen the header. Other tabs
+  // keep the full `profile — device (current)` rows.
+  const compactSelector = mode === 'plugins'
   const scopeOptions: { key: string; label: string; value: string }[] = useMemo(() => {
     if (multiConnection && rosterData?.agents?.length) {
       const activeId = activeGatewayConnectionId() ?? 'local'
 
       return rosterData.agents.map((agent: DesktopRosterAgent) => ({
         key: `${agent.connectionId}::${agent.profile}`,
-        label:
-          agent.connectionId === activeId
-            ? `${agent.profile} — ${agent.connectionLabel} (current)`
-            : `${agent.profile} — ${agent.connectionLabel}`,
+        label: rosterScopeLabel(agent, activeId, compactSelector),
         value: `${agent.connectionId}::${agent.profile}`
       }))
     }
@@ -717,7 +719,7 @@ export function SkillsView({
       label: p.is_default ? 'Hermes (default)' : p.name,
       value: p.name
     }))
-  }, [multiConnection, profilesData, rosterData])
+  }, [compactSelector, multiConnection, profilesData, rosterData])
 
   // The selector's current value must match one option's value exactly. On the
   // roster path an ambient (non-override) scope is the active gateway's
@@ -740,6 +742,8 @@ export function SkillsView({
   // with >1 option; hidden otherwise to avoid clutter.
   // Keep the selector in the same slot across tabs. Plugins labels its scope
   // as Agent because desktop halves belong to the app, not this profile.
+  // On the Plugins tab the trigger stays compact (scope-label helpers) so the
+  // in-window dropdown does not grow past the header cell.
   const scopeLabel = scopeOptions.find(option => option.value === scopeSelectValue)?.label
 
   const profileScopeSelector =
@@ -749,10 +753,10 @@ export function SkillsView({
       >
         <span className="text-[0.7rem] font-medium text-(--ui-text-tertiary)">{mode === 'plugins' ? t.skills.plugins.halfAgent : t.skills.configuringProfile}</span>
         <Select onValueChange={changeScope} value={scopeSelectValue}>
-          <SelectTrigger className="h-7 w-56 text-xs">
-            <SelectValue />
+          <SelectTrigger className={cn('text-xs', compactSelector ? COMPACT_SCOPE_TRIGGER_CLASS : 'h-7 w-56')}>
+            <SelectValue className={compactSelector ? 'min-w-0 truncate' : undefined} />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={compactSelector ? COMPACT_SCOPE_CONTENT_CLASS : undefined}>
             {scopeOptions.map(option => (
               <SelectItem key={option.key} value={option.value}>
                 {option.label}
@@ -787,6 +791,11 @@ export function SkillsView({
           profile. */}
       <div className="flex h-full flex-col">
         {profileScopeSelector}
+        {mode === 'plugins' ? (
+          <p className="min-w-0 px-3 pt-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+            {t.skills.plugins.pageBlurb}
+          </p>
+        ) : null}
         {(mode === 'skills' || mode === 'plugins') && (
           <CapabilityTabs
             actions={mode === 'skills' ? <UpdateSkillsButton profile={scopeProfile} /> : <PluginActions profile={scopeProfile} />}
