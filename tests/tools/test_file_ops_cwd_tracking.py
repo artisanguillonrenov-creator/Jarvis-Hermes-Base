@@ -106,6 +106,80 @@ class TestShellFileOpsCwdTracking:
         assert result.exit_code == 0
         assert "fixed-content" in result.stdout
 
+    def test_exec_ignores_poisoned_host_cwd_on_container_backend(self, tmp_path):
+        """A workspace override can set env.cwd to a raw host path (#113894).
+
+        Desktop/TUI/gateway surfaces register a workspace cwd via
+        ``register_task_env_overrides``/``record_session_cwd``, which (unlike
+        environment CREATION) does not re-run the container-cwd sanity check.
+        On a container backend (e.g. docker), a host-style override like
+        ``C:\\Users\\rashi\\...`` lands directly on the live env. Every
+        _exec() previously trusted that live cwd unconditionally, so the
+        wrapper's own ``cd -- <host path>`` failed and the raw shell error
+        leaked into write_file's response. _exec() must detect the
+        unusable container cwd and fall back to the last known-good cwd
+        instead of handing it to the backend.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "target.txt").write_text("workspace-content\n", encoding="utf-8")
+
+        env = _FakeEnv(start_cwd=str(workspace))
+        ops = ShellFileOperations(env, cwd=str(workspace), env_type="docker")
+
+        # Simulate the poisoning: a workspace override lands the raw host
+        # path directly on the live env, bypassing the creation-time guard.
+        env.cwd = r"C:\Users\rashi\OneDrive\Documents\ai_workspace"
+
+        result = ops._exec("cat target.txt")
+
+        assert result.exit_code == 0, (
+            f"exec failed with poisoned cwd instead of falling back: {result.stdout!r}"
+        )
+        assert "workspace-content" in result.stdout
+        assert env.calls[-1]["cwd"] != r"C:\Users\rashi\OneDrive\Documents\ai_workspace", (
+            "the unusable host cwd was handed to the backend instead of being discarded"
+        )
+
+    def test_construction_time_poisoned_cwd_falls_back_to_validated_default(
+        self, tmp_path, monkeypatch
+    ):
+        """The production call site (``tools/file_tools.py`` ``_get_file_ops``)
+        never passes a ``cwd=`` kwarg -- ``self.cwd`` is derived solely from
+        ``env.cwd``. A workspace override (``register_task_env_overrides``)
+        can poison ``env.cwd`` on an ALREADY-ACTIVE environment before the
+        task's first file-tool call ever builds this wrapper (e.g. the env
+        was created earlier via the ``terminal`` tool, an override lands on
+        it, and only then does a file tool run for the first time). Without
+        re-validating at construction time, that poisoned value gets baked
+        into ``self.cwd`` permanently, so _exec()'s fallback would be exactly
+        as broken as the live cwd it discards.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "target.txt").write_text("workspace-content\n", encoding="utf-8")
+
+        env = _FakeEnv(start_cwd=str(workspace))
+        # Poison BEFORE construction -- mirrors an override landing on an
+        # already-active env ahead of the task's first _get_file_ops() call.
+        env.cwd = r"C:\Users\rashi\OneDrive\Documents\ai_workspace"
+
+        monkeypatch.setattr(
+            "tools.terminal_tool._get_env_config",
+            lambda: {"cwd": str(workspace)},
+        )
+
+        # Matches tools/file_tools.py:367 verbatim -- no cwd= kwarg.
+        ops = ShellFileOperations(env, env_type="docker")
+
+        assert ops.cwd == str(workspace), (
+            f"poisoned env.cwd was baked into self.cwd at construction: {ops.cwd!r}"
+        )
+
+        result = ops._exec("cat target.txt")
+        assert result.exit_code == 0
+        assert "workspace-content" in result.stdout
+
     def test_patch_returns_success_only_when_file_actually_written(self, tmp_path):
         """Safety rail: patch_replace success must reflect the real file state.
 
