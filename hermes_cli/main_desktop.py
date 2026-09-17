@@ -7,6 +7,7 @@ are imported lazily inside the functions that use them (avoids an import cycle).
 import logging
 import contextlib
 import argparse
+import hashlib
 import os
 import re
 import shlex
@@ -1046,6 +1047,130 @@ def _desktop_macos_setup_tcc_identity(identity: str = "Hermes Local Signing") ->
         "stuck, reset it with:  tccutil reset All com.nousresearch.hermes"
     )
     return True
+
+
+def _app_asar_hash(app_path: Path) -> str | None:
+    """Return the SHA-256 hex digest of an app bundle's app.asar, or None."""
+    asar = app_path / "Contents" / "Resources" / "app.asar"
+    if not asar.is_file():
+        return None
+    h = hashlib.sha256()
+    try:
+        with open(asar, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, IOError):
+        return None
+
+
+def _swap_in_new_macos_bundle(tmp: Path, target: Path, old: Path) -> None:
+    """Move a staged macOS bundle into place without losing the old bundle."""
+    moved_old = False
+    if target.exists():
+        try:
+            target.rename(old)
+        except OSError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        moved_old = True
+
+    try:
+        tmp.rename(target)
+    except OSError as install_error:
+        rollback_error: OSError | None = None
+        if moved_old:
+            try:
+                old.rename(target)
+            except OSError as exc:
+                rollback_error = exc
+        shutil.rmtree(tmp, ignore_errors=True)
+        if rollback_error is not None:
+            raise OSError(
+                f"installing the staged bundle failed and rollback remains at {old}: "
+                f"{rollback_error}"
+            ) from install_error
+        raise
+
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _running_macos_app_bundles() -> set[Path]:
+    """``.app`` bundles of every live Hermes Desktop process. A running bundle is never swapped
+    under: Electron loads ``app.asar`` chunks and helper apps lazily, so renaming its bundle away
+    and deleting the old tree crashes the live app (the detached updater waits for it to exit)."""
+    import psutil  # noqa: PLC0415
+    bundles: set[Path] = set()
+    for proc in psutil.process_iter(["exe"]):
+        exe = proc.info.get("exe") or ""
+        if exe.endswith("/Contents/MacOS/Hermes"):
+            bundles.add(Path(exe).resolve().parents[2])
+    return bundles
+
+
+def _stage_macos_bundle_copy(src: Path, dst: Path) -> None:
+    """``ditto`` copies a bundle with its signature, xattrs and symlinks intact (``shutil`` drops
+    the resource-fork metadata codesign verifies)."""
+    subprocess.run(["/usr/bin/ditto", str(src), str(dst)], check=True, capture_output=True)
+
+
+def _install_rebuilt_desktop_app(desktop_dir: Path) -> tuple[list[Path], list[str]]:
+    """Copy the rebuilt macOS bundle over every stale installed ``Hermes.app`` (#52339).
+
+    ``hermes desktop --build-only`` (what ``hermes update`` runs) packages into
+    ``apps/desktop/release/`` only. Finder, the Dock and Spotlight launch the copy in
+    ``/Applications`` (or ``~/Applications``), so without this step every update leaves the
+    installed shell one build behind the backend it boots. The detached Desktop updater swaps
+    only the bundle it was launched from, so an app running from ``release/`` never refreshed
+    the installed copy either.
+
+    Returns ``(installed, problems)``: bundles that were replaced, and one user-facing line per
+    bundle that could not be (running, copy or swap failure). Both empty means every installed
+    copy was already current.
+    """
+    if sys.platform != "darwin":
+        return [], []
+    rebuilt_exe = _desktop_packaged_executable(desktop_dir)
+    if rebuilt_exe is None:
+        return [], []
+    from hermes_cli.gui_uninstall import packaged_gui_app_paths  # noqa: PLC0415
+    # .../Hermes.app/Contents/MacOS/Hermes -> .../Hermes.app
+    return _install_rebuilt_macos_bundles(
+        rebuilt_exe.parents[2], packaged_gui_app_paths(), running=_running_macos_app_bundles())
+
+
+def _install_rebuilt_macos_bundles(
+        rebuilt_app: Path, candidates: list[Path], *, running: set[Path]) -> tuple[list[Path], list[str]]:
+    """Stage-and-swap ``rebuilt_app`` over each existing bundle in ``candidates`` whose ``app.asar``
+    differs. The rebuilt bundle already carries the stable local signing identity and no
+    quarantine xattr (``_desktop_macos_relaunchable_fixup``); ``ditto`` preserves both, so nothing
+    is re-signed here and TCC grants survive."""
+    rebuilt_hash = _app_asar_hash(rebuilt_app)
+    if rebuilt_hash is None:
+        return [], []
+    installed: list[Path] = []
+    problems: list[str] = []
+    for app in candidates:
+        if not app.is_dir() or _app_asar_hash(app) == rebuilt_hash:
+            continue
+        if app.resolve() in running:
+            problems.append(
+                f"{app} is running and was not refreshed; quit Hermes Desktop and run "
+                "`hermes update` again (or update from inside the app)")
+            continue
+        tmp = app.parent / f"{app.name}.hermes-update-new"
+        old = app.parent / f"{app.name}.hermes-update-old"
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+        try:
+            _stage_macos_bundle_copy(rebuilt_app, tmp)
+            _swap_in_new_macos_bundle(tmp, app, old)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            shutil.rmtree(tmp, ignore_errors=True)
+            problems.append(f"{app} could not be replaced ({exc}); the previous app was kept")
+            continue
+        installed.append(app)
+    return installed, problems
 
 
 def _force_adhoc_macos_signing(env: dict, *, source_mode: bool) -> bool:
