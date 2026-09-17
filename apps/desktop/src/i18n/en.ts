@@ -3626,7 +3626,10 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit models…',
       refreshModels: 'Refresh models',
-      fast: 'Fast'
+      fast: 'Fast',
+      pinned: 'Pinned',
+      pin: 'Pin model',
+      unpin: 'Unpin model'
     },
     modelOptions: {
       noOptions: 'No options for this model',
