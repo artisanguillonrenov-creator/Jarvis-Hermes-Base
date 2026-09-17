@@ -1021,3 +1021,90 @@ def test_relay_waiter_that_cannot_start_reports_queued_not_failed(tmp_path, monk
     assert "Do NOT resend" in result["detail"]
     assert "approval" in result["notification_error"]
     assert list((bot_relay.relay_root(root) / bot_relay.OUTBOX_DIR).glob("*.json")), "envelope still queued"
+
+
+# ── display_name-aware identity (attribution + inbound resolution) ───────────
+
+
+# ── DM and relay identity honours the profile's display_name ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("name", "display_name", "expected"),
+    [
+        ("default", "CTO", "cto"),
+        ("researcher", "Research Lead", "research-lead"),
+        ("researcher", "Hermes", "researcher"),  # reserved: would claim the default's @hermes
+        ("default", "", "hermes"),
+        ("default", None, "hermes"),  # no directory passed: the canonical mapping, never another home's name
+    ],
+    ids=["slugged", "multi-word", "reserved-name", "empty", "no-directory"],
+)
+def test_the_handle_is_the_named_profiles_own_display_name_slug(tmp_path, name, display_name, expected):
+    """The handle belongs to the profile being NAMED, read from its own directory: the roster
+    line, the delivery label and the relay envelope all pass a teammate, not self."""
+    if display_name is None:
+        assert bot_mode_probe._handle(name) == expected
+        return
+    home = tmp_path / name
+    home.mkdir()
+    if display_name:
+        (home / "profile.yaml").write_text(f"display_name: {display_name}\n", encoding="utf-8")
+
+    assert bot_mode_probe._handle(name, home) == expected
+
+
+@pytest.mark.parametrize(
+    ("target", "rival", "expected"),
+    [
+        ("cto", False, "default"),  # the renamed default answers to its display slug
+        ("cto", True, "cto"),  # a real profile named like another's display_name keeps priority
+        ("hermes", False, "default"),
+        ("researcher", False, "researcher"),
+    ],
+    ids=["display-slug", "canonical-outranks-slug", "canonical-alias", "canonical-name"],
+)
+def test_resolution_prefers_a_canonical_name_over_a_display_slug(tmp_path, target, rival, expected):
+    renamed_default = tmp_path / ".hermes"
+    renamed_default.mkdir()
+    (renamed_default / "profile.yaml").write_text("display_name: CTO\n", encoding="utf-8")
+    dirs = {"default": renamed_default, "researcher": tmp_path / "researcher"}
+    if rival:
+        (tmp_path / "profiles" / "cto").mkdir(parents=True)
+        dirs["cto"] = tmp_path / "profiles" / "cto"
+
+    assert bot_mode_dm._resolve_local_name(target, list(dirs), dirs) == expected
+    # Without the directories only canonical names resolve: the display slug alone finds nothing.
+    assert bot_mode_dm._resolve_local_name(target, list(dirs)) == (None if (target == "cto" and not rival) else expected)
+
+
+def _rename_teammate(home: Path, name: str, display_name: str) -> None:
+    with open(home / "profiles" / name / "profile.yaml", "a", encoding="utf-8") as fh:
+        fh.write(f"display_name: {display_name}\n")
+
+
+def test_message_agent_addresses_signs_and_lists_teammates_by_display_handle(tmp_path, monkeypatch):
+    """Through the real tool, since the helpers stay green if message_agent_tool stops handing
+    the resolver the roster's directories: a teammate is reachable by its display slug and
+    labelled by it while the transport still names the canonical profile; the sender signs the
+    DM text and the memory-hook author with ITS display handle; an unknown target is answered
+    with the teammates' display handles."""
+    home = _managed_home(tmp_path, teammates=("researcher",))
+    _rename_teammate(home, "researcher", "Research Lead")
+    (home / "profile.yaml").write_text("display_name: CTO\n", encoding="utf-8")
+    seen = {}
+
+    def _record(argv, content, label, **kwargs):
+        seen.update(argv=argv, content=content, label=label, author=kwargs.get("author"))
+        return json.dumps({"status": "sent", "to": label})
+
+    monkeypatch.setattr(bot_mode_dm, "_start_delivery", _record)
+
+    sent = json.loads(bot_mode_dm.message_agent_tool(target="@research-lead", message="hi", agent=_FakeAgent(home)))
+    unknown = json.loads(bot_mode_dm.message_agent_tool(target="@nobody", message="hi", agent=_FakeAgent(home)))
+
+    assert sent["status"] == "sent" and seen["label"] == "@research-lead"
+    assert seen["argv"][1:3] == ["-p", "researcher"]
+    assert seen["content"].startswith("Message from 🤖 cto (@cto): ")
+    assert seen["author"]["name"] == "cto"
+    assert "research-lead" in unknown["teammates"] and "researcher" not in unknown["teammates"]
