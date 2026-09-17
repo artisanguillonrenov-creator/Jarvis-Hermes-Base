@@ -78,8 +78,9 @@ for output in outputs:
 
 ```bash
 # Start server (automatic model download and compilation)
+# Tensor parallelism (4 GPUs)
 trtllm-serve meta-llama/Meta-Llama-3-8B \
-    --tp_size 4 \              # Tensor parallelism (4 GPUs)
+    --tp_size 4 \
     --max_batch_size 256 \
     --max_num_tokens 4096
 
@@ -189,5 +190,4 @@ outputs = llm.generate(
 - **Docs**: https://nvidia.github.io/TensorRT-LLM/
 - **GitHub**: https://github.com/NVIDIA/TensorRT-LLM
 - **Models**: https://huggingface.co/models?library=tensorrt_llm
-
 
