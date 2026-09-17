@@ -2,6 +2,8 @@
 
 import logging
 import subprocess
+import sys
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -340,6 +342,26 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     assert content.endswith("\r\n")
 
 
+def test_start_with_redirected_stdin_does_not_install_login_autostart(monkeypatch):
+    """A non-interactive start must not create a Scheduled Task or Startup entry (#113977)."""
+    installs = []
+    spawns = []
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_print_start_attestation_warning", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
+    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: False)
+    monkeypatch.setattr(gateway_windows, "is_startup_entry_installed", lambda: False)
+    monkeypatch.setattr(gateway_windows, "install", lambda **kwargs: installs.append(kwargs))
+    monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda: spawns.append(True))
+    monkeypatch.setattr(sys, "stdin", StringIO(""))
+
+    gateway_windows.start()
+
+    assert installs == []
+    assert spawns == []
+
+
 
 
 
@@ -362,7 +384,6 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
 # the gateway's marker-watcher thread to drain + exit cleanly, then escalates
 # to taskkill if drain times out.
 # ---------------------------------------------------------------------------
-
 
 
 
