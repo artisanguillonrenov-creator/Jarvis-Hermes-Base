@@ -66,22 +66,25 @@ class TestCreateSurfacesGatewayLiveness:
         assert result["gateway_running"] is True
         assert "warning" not in result
 
-    def test_create_without_gateway_warns_not_scheduled(self, hermes_env):
-        with (
-            patch_liveness(provider="builtin", pids=[]),
-        ):
+    def test_create_without_gateway_is_refused(self, hermes_env):
+        """Superseded advisory behavior: warning-only creates put three dead
+        jobs in the store, so a gateway-less create is now REFUSED outright."""
+        from cron.jobs import list_jobs
+
+        with patch_liveness(provider="builtin", pids=[]):
             result = _create_job()
 
-        assert result["success"] is True, (
-            "the job itself is still created successfully"
-        )
+        assert result["success"] is False
         assert result["gateway_running"] is False
-        warning = result.get("warning", "")
-        assert "not running" in warning.lower()
-        assert "will NOT fire" in warning, (
-            "the model must be told the job won't fire (#87033)"
+        error = result["error"]
+        assert "not running" in error.lower()
+        assert "will NOT fire" in error, (
+            "the refusal must cite the dead-store wording (#87033)"
         )
-        assert "gateway" in warning.lower()
+        assert "hermes gateway start" in error
+        assert "--allow-dead-store" not in error, "tool path names the tool override"
+        assert "allow_dead_store=True" in error
+        assert list_jobs(include_disabled=True) == [], "nothing may be stored"
 
     def test_non_builtin_provider_is_exempt(self, hermes_env):
         """External schedulers (e.g. Chronos) fire without the gateway —
@@ -368,3 +371,208 @@ class TestCronStatusLockFirst:
     def test_no_lock_no_pids_still_warns(self, hermes_env):
         text = self._run_status(pids=[], lock_active=False)
         assert "NOT fire" in text
+
+
+class TestCreateRefusesDeadStore:
+    """A job stored with no gateway to tick it is dead on arrival (#87033).
+
+    The advisory warning was not enough — creates now hard-refuse unless the
+    caller explicitly overrides, or is a board worker with no human present
+    to start a gateway (those get the loud warning instead).
+    """
+
+    def test_override_allows_dead_store(self, hermes_env):
+        from tools.cronjob_tools import cronjob
+
+        with patch_liveness(provider="builtin", pids=[]):
+            result = json.loads(
+                cronjob(
+                    action="create",
+                    schedule="every 10m",
+                    prompt="say hi",
+                    deliver="local",
+                    allow_dead_store=True,
+                )
+            )
+
+        assert result["success"] is True
+        assert result["gateway_running"] is False
+        assert "will NOT fire" in result["warning"], (
+            "the override schedules the job but must not silence the warning"
+        )
+
+    def test_kanban_worker_warns_instead_of_refusing(self, hermes_env, monkeypatch):
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-123")
+        with patch_liveness(provider="builtin", pids=[]):
+            result = _create_job()
+
+        assert result["success"] is True, (
+            "a board worker has no human at the prompt to start a gateway"
+        )
+        assert result["gateway_running"] is False
+        assert "will NOT fire" in result["warning"]
+
+    def test_delegated_child_of_worker_still_refuses(self, hermes_env, monkeypatch):
+        """Inherited HERMES_KANBAN_* is not proof of worker ownership — the
+        canonical dispatcher-ownership check settles it (delegation_context)."""
+        from agent.delegation_context import delegated_child_context
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "task-123")
+        with delegated_child_context(), patch_liveness(provider="builtin", pids=[]):
+            result = _create_job()
+
+        assert result["success"] is False
+
+    def test_non_builtin_provider_is_never_refused(self, hermes_env):
+        with patch_liveness(provider="chronos", pids=[]):
+            result = _create_job()
+
+        assert result["success"] is True
+
+    def test_failed_probe_is_never_refused(self, hermes_env):
+        """Refusing on an unknown probe would be a false alarm."""
+        with patch_liveness(provider=None, pids=[]):
+            result = _create_job()
+
+        assert result["success"] is True
+        assert result["gateway_running"] is None
+
+    def test_schema_exposes_the_override(self):
+        from tools.cronjob_tools import CRONJOB_SCHEMA
+
+        prop = CRONJOB_SCHEMA["parameters"]["properties"]["allow_dead_store"]
+        assert prop["type"] == "boolean"
+        assert "REFUSED" in prop["description"]
+
+
+class TestCliCreateRefusesDeadStore:
+    """`hermes cron create` fails loudly (exit 1, red) rather than storing a
+    job the ticker will never reach."""
+
+    def _run(self, *, allow_dead_store):
+        import argparse
+
+        from hermes_cli.cron import cron_create
+
+        args = argparse.Namespace(
+            schedule="every 10m",
+            prompt="say hi",
+            name="cli-liveness-job",
+            deliver="local",
+            allow_dead_store=allow_dead_store,
+        )
+        return cron_create(args)
+
+    def test_refuses_without_flag(self, hermes_env, capsys):
+        from cron.jobs import list_jobs
+
+        with patch_liveness(provider="builtin", pids=[]):
+            rc = self._run(allow_dead_store=False)
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "will NOT fire" in out
+        assert "--allow-dead-store" in out
+        assert "Failed to create job" in out
+        assert list_jobs(include_disabled=True) == [], "nothing may be stored"
+
+    def test_flag_allows_creation(self, hermes_env, capsys):
+        from cron.jobs import list_jobs
+
+        with patch_liveness(provider="builtin", pids=[]):
+            rc = self._run(allow_dead_store=True)
+
+        assert rc == 0
+        assert len(list_jobs(include_disabled=True)) == 1
+        assert "Created job:" in capsys.readouterr().out
+
+    def test_live_gateway_creates_as_before(self, hermes_env, capsys):
+        from cron.jobs import list_jobs
+
+        with patch_liveness(provider="builtin", pids=[12345]):
+            rc = self._run(allow_dead_store=False)
+
+        assert rc == 0
+        assert len(list_jobs(include_disabled=True)) == 1
+
+
+class TestSharedCreationBoundaryRefusesDeadStore:
+    """The gate lives at ``create_job_with_scheduler_registration`` — the one
+    creation boundary every surface routes through (tool, CLI, blueprints,
+    suggestion accept, REST), so no sibling path can store a dead job.
+
+    A ``paused`` create is exempt: it is deliberately inert at creation time.
+    """
+
+    def _create(self, **kwargs):
+        from cron.scheduler import create_job_with_scheduler_registration
+
+        spec = {
+            "prompt": "say hi", "schedule": "every 10m",
+            "name": "blueprint:standup", "deliver": "local",
+        }
+        spec.update(kwargs)
+        return create_job_with_scheduler_registration(**spec)
+
+    def test_boundary_refuses_without_gateway(self, hermes_env):
+        from cron.jobs import list_jobs
+        from cron.scheduler import CronDeadStoreError
+
+        with patch_liveness(provider="builtin", pids=[]):
+            with pytest.raises(CronDeadStoreError) as exc:
+                self._create()
+
+        assert "will NOT fire" in str(exc.value)
+        assert list_jobs(include_disabled=True) == [], "nothing may be stored"
+
+    def test_boundary_creates_with_live_gateway(self, hermes_env):
+        with patch_liveness(provider="builtin", pids=[12345]):
+            job = self._create()
+
+        assert job["name"] == "blueprint:standup"
+
+    def test_paused_create_is_exempt(self, hermes_env):
+        """store-now/activate-later: the job is deliberately inert, and
+        resuming it needs a gateway anyway."""
+        with patch_liveness(provider="builtin", pids=[]):
+            job = self._create(paused=True)
+
+        assert job["enabled"] is False
+
+    def test_override_reaches_the_boundary(self, hermes_env):
+        with patch_liveness(provider="builtin", pids=[]):
+            job = self._create(allow_dead_store=True)
+
+        assert job["id"]
+
+    def test_tool_paused_create_is_exempt(self, hermes_env):
+        from tools.cronjob_tools import cronjob
+
+        with patch_liveness(provider="builtin", pids=[]):
+            result = json.loads(
+                cronjob(action="create", schedule="every 10m", prompt="say hi",
+                        deliver="local", paused=True))
+
+        assert result["success"] is True
+
+    def test_cli_paused_create_is_exempt(self, hermes_env):
+        import argparse
+
+        from hermes_cli.cron import cron_create
+
+        args = argparse.Namespace(
+            schedule="every 10m", prompt="say hi", name="cli-paused-job",
+            deliver="local", allow_dead_store=False, paused=True, paused_reason=None)
+        with patch_liveness(provider="builtin", pids=[]):
+            assert cron_create(args) == 0
+
+    def test_suggestion_accept_reports_the_refusal(self, hermes_env):
+        """`/suggestions accept` must print the refusal, not raise."""
+        from cron.scheduler import CronDeadStoreError
+        from hermes_cli.suggestions_cmd import _accept
+
+        class _Store:
+            def accept_suggestion(self, ref, origin=None):
+                raise CronDeadStoreError("will NOT fire")
+
+        assert "will NOT fire" in _accept(_Store(), "1", None, "cli")

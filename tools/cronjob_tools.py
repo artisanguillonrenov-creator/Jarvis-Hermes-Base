@@ -50,6 +50,7 @@ from tools.cronjob_job_args import (
     _apply_continuity,
     _canonical_skills,
     _clean_str_list,
+    _dead_store_refusal,
     _format_job,
     _gateway_liveness_notice,
     _local_delivery_notice,
@@ -596,9 +597,11 @@ def _action_create(a: Dict[str, Any]) -> str:
     if a["continuity"] is not None:
         context_from = _apply_continuity(context_from, a["continuity"])
 
-    from cron.scheduler import CronSchedulerRegistrationError, create_job_with_scheduler_registration
+    from cron.scheduler import (
+        CronDeadStoreError, CronSchedulerRegistrationError, create_job_with_scheduler_registration)
     try:
         job = create_job_with_scheduler_registration(
+            allow_dead_store=a.get("allow_dead_store"),
             prompt=prompt or "", schedule=a["schedule"], name=a["name"], repeat=a["repeat"],
             deliver=_resolve_cron_context_deliver(deliver), origin=_origin_from_env(), skills=canonical_skills,
             model=_normalize_optional_job_value(a["model"]), provider=_normalize_optional_job_value(a["provider"]),
@@ -613,6 +616,8 @@ def _action_create(a: Dict[str, Any]) -> str:
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
+    except CronDeadStoreError as exc:
+        return tool_error(str(exc), success=False, gateway_running=False)
     except CronSchedulerRegistrationError as exc:
         _partial = exc.to_dict()
         return tool_error(_partial.pop("error"), success=False, **_partial)
@@ -956,6 +961,7 @@ def cronjob(
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[Union[str, List[str]]] = None,
     all: Optional[bool] = None,
+    allow_dead_store: Optional[bool] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
     paused: bool = False,
@@ -1074,6 +1080,10 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "boolean",
                 "description": "True = each run sees the job's own previous output, so it can dedupe and continue where it left off (scouts, monitors, incremental digests). Default false. On update, false turns it off."
             },
+            "allow_dead_store": {
+                "type": "boolean",
+                "description": "For create only. By default a create is REFUSED when no gateway is running, because the scheduler's ticker lives in the gateway process and the job could never fire. Set true only after telling the user the job will stay inert until they run 'hermes gateway install' / 'hermes gateway start'."
+            },
             "enabled_toolsets": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1127,6 +1137,7 @@ def _cronjob_handler(args, **kw):
         include_disabled=args.get("include_disabled", True),
         monitor_script=_mon_script,
         monitor_url=_mon_url,
+        allow_dead_store=args.get("allow_dead_store"),
         task_id=kw.get("task_id"),
         session_id=kw.get("session_id"),
         paused=args.get("paused", False),
