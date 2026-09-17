@@ -840,6 +840,7 @@ const AssistantActionBar: FC<MessageActionProps & { durationS?: number }> = ({
           // no visual change during streaming.
           'relative flex flex-row items-center justify-end gap-1.5 py-1.5 opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100'
         }
+        data-reaction-picker-open={pickerOpen || undefined}
         data-slot="aui_msg-actions"
       >
         {onBranchInNewChat && (
