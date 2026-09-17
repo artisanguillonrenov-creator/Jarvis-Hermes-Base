@@ -563,7 +563,8 @@ export const ru = defineLocale({
       testUnsupported: 'Эта система не поддерживает системные уведомления.',
       completionSoundTitle: 'Звук завершения',
       completionSoundDesc: 'Воспроизводится, когда ход агента завершён. Выберите пресет и прослушайте здесь.',
-      completionSoundPreview: 'Прослушать'
+      completionSoundPreview: 'Прослушать',
+      completionSoundVolumeTitle: 'Уровень громкости'
     },
     sections: {
       model: 'Модель',
