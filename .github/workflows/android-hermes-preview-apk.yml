@@ -30,14 +30,10 @@ jobs:
         run: npm install -g npm@11.19.1
 
       - name: Install Desktop renderer dependencies
-        id: npm_install
-        continue-on-error: true
         run: npm ci --workspace apps/desktop --workspace apps/shared --include-workspace-root
 
       - name: Build real Hermes Desktop renderer
-        id: renderer
-        continue-on-error: true
-        run: npm exec --workspace apps/desktop -- vite build
+        run: npm exec --workspace apps/desktop -- vite build --minify=false --sourcemap
 
       - name: Stage renderer for Android
         shell: bash
@@ -46,12 +42,9 @@ jobs:
           ASSETS="android/hermes-preview/app/src/main/assets/www"
           rm -rf "$ASSETS"
           mkdir -p "$ASSETS"
-
-          if [ -f apps/desktop/dist/index.html ]; then
-            echo "Using real Hermes Desktop Vite renderer"
-            cp -R apps/desktop/dist/. "$ASSETS/"
-            cp android/hermes-preview/android-bridge-shim.js "$ASSETS/android-bridge-shim.js"
-            python - <<'PY'
+          cp -R apps/desktop/dist/. "$ASSETS/"
+          cp android/hermes-preview/android-bridge-shim.js "$ASSETS/android-bridge-shim.js"
+          python - <<'PY'
           from pathlib import Path
           p = Path('android/hermes-preview/app/src/main/assets/www/index.html')
           s = p.read_text(encoding='utf-8')
@@ -63,10 +56,46 @@ jobs:
                   s = marker + '\n' + s
           p.write_text(s, encoding='utf-8')
           PY
-          else
-            echo "Renderer build unavailable; packaging fallback page"
-            cp -R android/hermes-preview/fallback/. "$ASSETS/"
-          fi
+
+      - name: Smoke-test staged Hermes renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm exec --workspace apps/desktop -- playwright install chromium
+          python3 -m http.server 4178 --directory android/hermes-preview/app/src/main/assets/www >/tmp/hermes-preview-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          sleep 2
+          cd apps/desktop
+          node --input-type=module <<'JS'
+          import { chromium } from '@playwright/test'
+          const browser = await chromium.launch({ headless: true })
+          const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+          const errors = []
+          page.on('pageerror', err => errors.push(`PAGEERROR: ${err.stack || err.message}`))
+          page.on('console', msg => {
+            const text = msg.text()
+            if (msg.type() === 'error' || /error|exception|not a function/i.test(text)) {
+              errors.push(`CONSOLE ${msg.type()}: ${text}`)
+            }
+          })
+          await page.goto('http://127.0.0.1:4178/index.html', { waitUntil: 'domcontentloaded' })
+          await page.waitForTimeout(5000)
+          const body = await page.locator('body').innerText().catch(() => '')
+          console.log('--- RENDERED BODY ---')
+          console.log(body.slice(0, 5000))
+          console.log('--- END BODY ---')
+          if (/Something broke in the interface|Hermes Android preview — JavaScript error|Hermes Android preview — startup error/i.test(body)) {
+            errors.push('Renderer reached its fatal/error-boundary UI')
+          }
+          if (errors.length) {
+            console.error('--- RENDER ERRORS ---')
+            console.error(errors.join('\n\n'))
+            await browser.close()
+            process.exit(1)
+          }
+          await browser.close()
+          JS
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -83,8 +112,7 @@ jobs:
         run: gradle -p android/hermes-preview :app:assembleDebug --stacktrace
 
       - name: Rename APK
-        run: |
-          cp android/hermes-preview/app/build/outputs/apk/debug/app-debug.apk Hermes-Android-Preview.apk
+        run: cp android/hermes-preview/app/build/outputs/apk/debug/app-debug.apk Hermes-Android-Preview.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
