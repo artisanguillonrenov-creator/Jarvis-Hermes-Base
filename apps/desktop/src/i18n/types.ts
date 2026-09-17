@@ -3327,6 +3327,9 @@ export interface Translations {
     terminalHide: string
     terminalsAria: string
     terminalNew: string
+    terminalReadOnly: string
+    terminalReadOnlyHelp: string
+    terminalOpenInteractive: string
     terminalCloseOthers: string
     terminalCloseAll: string
     addToChat: string
