@@ -2290,6 +2290,7 @@ export interface PendingApproval {
   request_id?: string | null
   command?: string | null
   description?: string | null
+  purpose?: string | null
   pattern_key?: string | null
   pattern_keys?: string[] | null
   allow_permanent?: boolean | null
@@ -3713,6 +3714,7 @@ export interface ApprovalRequestParams {
   request_id: string
   command?: string
   description?: string
+  purpose?: string | null
   choices?: ApprovalChoice[]
   allow_permanent?: boolean | null
   allow_session?: boolean | null
