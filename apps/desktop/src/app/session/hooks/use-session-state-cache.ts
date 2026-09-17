@@ -144,39 +144,67 @@ export function useSessionStateCache({
 
       if (existing) {
         if (storedSessionId !== undefined && storedSessionId !== existing.storedSessionId) {
-          // Stored id changed (e.g. auto-compression rotated it). Create a NEW
-          // state object rather than mutating in place — updateSessionState needs
-          // the PREVIOUS state to detect transitions (busy→idle, id rotation).
-          const updated = invalidatePersistedDisplayTranscriptAuthority({ ...existing, storedSessionId })
+          // A stored id another LIVE runtime already owns is not this runtime's
+          // rotation — it is a stale pair: some pipeline still holds the OLD
+          // conversation's runtime id while its target stored id is the session
+          // the user has since opened (the queue-drain shape submit.ts
+          // documents as "sessionId=A-runtime with storedSessionId=B"). Taking
+          // it would do three wrong things at once: DELETE the other runtime's
+          // proven stored→runtime binding, REBIND the new session to this old
+          // runtime, and (when this runtime is the active one) publish a
+          // rotation that walks the foreground onto the new session. The next
+          // Enter there then resolves a "proven" runtime that is really the old
+          // conversation's, so the turn is persisted into the OLD stored
+          // session while the view shows the new one — the UI/backend split
+          // this guard exists to prevent. Refuse the relabel outright: the
+          // caller's own target resolution (getRuntimeIdForStoredSession, the
+          // send-time ownership check) then fails closed and re-resumes the
+          // session it actually meant to send to.
+          //
+          // Only a LIVE claimer blocks the relabel: a binding left behind by an
+          // evicted/reaped runtime is exactly the take-over a resume or
+          // reconnect performs, and must keep working.
+          // ponytail: single stale-runtime claim, no alias walk. Add a lineage
+          // check (sessionMatchesStoredId) if a dead binding for a rotated tip
+          // ever blocks a genuine compression rotation.
+          const claimer = storedSessionId ? runtimeIdByStoredSessionIdRef.current.get(storedSessionId) : undefined
+          const claimedByLiveRuntime = Boolean(claimer && claimer !== sessionId && sessionStateCache.get(claimer))
 
-          // Drop the obsolete stored→runtime reverse mapping as soon as the id
-          // rotates (e.g. auto-compression forks a continuation). Leaving the
-          // stale key lets getRuntimeIdForStoredSession resolve the old stored id
-          // to this runtime, which the compression route-follow logic relies on
-          // being absent. The rotation signal was previously emitted centrally
-          // from handleTransition (session-states.ts), but updateSessionState
-          // now skips publishSessionState (and thus handleTransition) when the
-          // updater is a no-op — fire it here so the route-follow effect still
-          // tracks compression without needing a dummy state write.
-          if (existing.storedSessionId && existing.storedSessionId !== storedSessionId) {
-            runtimeIdByStoredSessionIdRef.current.delete(existing.storedSessionId)
+          if (!claimedByLiveRuntime) {
+            // Stored id changed (e.g. auto-compression rotated it). Create a NEW
+            // state object rather than mutating in place — updateSessionState needs
+            // the PREVIOUS state to detect transitions (busy→idle, id rotation).
+            const updated = invalidatePersistedDisplayTranscriptAuthority({ ...existing, storedSessionId })
 
-            // A rotation event needs a real next id — a null/cleared stored id
-            // is a detach, not a rotation the route-follow effect should chase.
-            if (storedSessionId && sessionId === $activeSessionId.get()) {
-              setActiveSessionStoredIdRotation({
-                nextStoredSessionId: storedSessionId,
-                previousStoredSessionId: existing.storedSessionId,
-                runtimeSessionId: sessionId
-              })
+            // Drop the obsolete stored→runtime reverse mapping as soon as the id
+            // rotates (e.g. auto-compression forks a continuation). Leaving the
+            // stale key lets getRuntimeIdForStoredSession resolve the old stored id
+            // to this runtime, which the compression route-follow logic relies on
+            // being absent. The rotation signal was previously emitted centrally
+            // from handleTransition (session-states.ts), but updateSessionState
+            // now skips publishSessionState (and thus handleTransition) when the
+            // updater is a no-op — fire it here so the route-follow effect still
+            // tracks compression without needing a dummy state write.
+            if (existing.storedSessionId && existing.storedSessionId !== storedSessionId) {
+              runtimeIdByStoredSessionIdRef.current.delete(existing.storedSessionId)
+
+              // A rotation event needs a real next id — a null/cleared stored id
+              // is a detach, not a rotation the route-follow effect should chase.
+              if (storedSessionId && sessionId === $activeSessionId.get()) {
+                setActiveSessionStoredIdRotation({
+                  nextStoredSessionId: storedSessionId,
+                  previousStoredSessionId: existing.storedSessionId,
+                  runtimeSessionId: sessionId
+                })
+              }
             }
-          }
 
-          if (storedSessionId) {
-            runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
-          }
+            if (storedSessionId) {
+              runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
+            }
 
-          sessionStateCache.set(sessionId, updated)
+            sessionStateCache.set(sessionId, updated)
+          }
         }
 
         return sessionStateCache.get(sessionId)!
