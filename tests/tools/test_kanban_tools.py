@@ -516,6 +516,60 @@ def test_link_happy_path(worker_env):
     assert d["ok"] is True
 
 
+def test_link_running_child_allows_owner_but_rejects_foreign(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        own_parent = kb.create_task(conn, title="own review")
+        own_run_id = kb.get_task(conn, worker_env).current_run_id
+        foreign_parent = kb.create_task(conn, title="foreign review")
+        foreign_child = kb.create_task(conn, title="foreign worker")
+        assert kb.claim_task(conn, foreign_child, claimer="other") is not None
+
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(own_run_id))
+    own = json.loads(kt._handle_link({"parent_id": own_parent, "child_id": worker_env}))
+    foreign = json.loads(kt._handle_link(
+        {"parent_id": foreign_parent, "child_id": foreign_child},
+    ))
+
+    assert own["ok"] is True
+    assert "child is already running" in foreign["error"]
+    with kbc.connect() as conn:
+        assert kb.parent_ids(conn, worker_env) == [own_parent]
+        assert kb.parent_ids(conn, foreign_child) == []
+
+
+def test_link_running_child_does_not_borrow_ownership_across_boards(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        own_run_id = kb.get_task(conn, worker_env).current_run_id
+
+    kb.create_board("alt")
+    with kbc.connect(board="alt") as conn:
+        parent = kb.create_task(conn, title="alternate parent")
+        child = kb.create_task(conn, title="colliding worker")
+        conn.execute("UPDATE tasks SET id = ? WHERE id = ?", (worker_env, child))
+        conn.commit()
+        assert kb.claim_task(conn, worker_env, claimer="other") is not None
+        assert kb.get_task(conn, worker_env).current_run_id == own_run_id
+
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(own_run_id))
+    result = json.loads(kt._handle_link({
+        "board": "alt", "parent_id": parent, "child_id": worker_env,
+    }))
+
+    assert "child is already running" in result["error"]
+    with kbc.connect(board="alt") as conn:
+        assert kb.parent_ids(conn, worker_env) == []
+
+
 def test_unblock_happy_path(monkeypatch, worker_env):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban_db as kb
