@@ -331,7 +331,12 @@ def test_compute_host_explicit_images_do_not_clear_later_attachment(monkeypatch)
         def submit_turn(self, _frame, *, on_complete=None):
             session["attached_images"].append("/tmp/c.png")
 
-    session = _session(attached_images=[])
+    session = _session(
+        attached_images=[],
+        running=True,
+        _active_turn_id="image-turn",
+        _active_turn_route="compute",
+    )
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _Supervisor())
 
     response = server._submit_prompt_to_compute_host(
@@ -454,6 +459,8 @@ def test_compute_host_turn_end_updates_metadata_mirror(monkeypatch):
         agent_ready=threading.Event(),
         history=[{"role": "user", "content": "serving process must not read this"}],
         _compute_host_active=True,
+        _compute_host_turn_id="compute-turn",
+        _active_turn_id="compute-turn",
     )
     server._sessions["iso-sid"] = session
     emitted = []
@@ -479,6 +486,7 @@ def test_compute_host_turn_end_updates_metadata_mirror(monkeypatch):
                     "usage": {"total": 140, "context_used": 80, "context_max": 1000},
                 },
             },
+            expected_turn_id="compute-turn",
         )
 
         assert session["session_key"] == "rotated-session-key"
@@ -545,8 +553,8 @@ def test_compute_host_interrupt_forwards_when_parent_running_mirror_is_stale(mon
     interrupted = []
 
     class _Supervisor:
-        def interrupt(self, sid, *, request_id=None):
-            interrupted.append((sid, request_id))
+        def interrupt(self, sid, *, request_id=None, expected_turn_id=None):
+            interrupted.append((sid, request_id, expected_turn_id))
 
     sid = "host-stale-running"
     server._sessions[sid] = _session(
@@ -563,7 +571,7 @@ def test_compute_host_interrupt_forwards_when_parent_running_mirror_is_stale(mon
             {"id": "interrupt", "method": "session.interrupt", "params": {"session_id": sid}}
         )
         assert response["result"] == {"status": "interrupted", "turn_isolation": True}
-        assert interrupted == [(sid, "interrupt-interrupt")]
+        assert interrupted == [(sid, "interrupt-interrupt", None)]
     finally:
         server._sessions.pop(sid, None)
 
@@ -4947,8 +4955,8 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
             return None
 
     class _Supervisor:
-        def interrupt(self, sid, *, request_id=None):
-            interrupted.append((sid, request_id))
+        def interrupt(self, sid, *, request_id=None, expected_turn_id=None):
+            interrupted.append((sid, request_id, expected_turn_id))
 
     session = _session(
         agent=None,
@@ -4978,7 +4986,9 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
         server._schedule_ws_orphan_reap("isolated-sid")
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert len(interrupted) == 1
+        assert interrupted[0][:2] == ("isolated-sid", "client-gone-isolated-sid")
+        assert isinstance(interrupted[0][2], str) and len(interrupted[0][2]) == 32
         assert session["_turn_cancel_requested"] is True
         assert session["queued_prompt"] is None
         assert session["history"] == [{"role": "assistant", "content": "partial"}]
@@ -4986,7 +4996,7 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
 
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert len(interrupted) == 1
         assert len(callbacks) == 1
 
         session["running"] = False
@@ -12528,11 +12538,20 @@ def test_turn_admission_carries_synthetic_display_metadata_into_inflight_snapsho
     """A reconnect must retain the typed synthetic user bubble (#112144)."""
     monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
     agent = Mock()
-    session = {"agent": agent, "attached_images": [], "history_lock": threading.RLock()}
+    session = {
+        "agent": agent,
+        "attached_images": [],
+        "history_lock": threading.RLock(),
+        "running": True,
+        "_active_turn_id": "synthetic-turn",
+        "_active_turn_authorization": None,
+        "_active_turn_route": "inline",
+    }
     display_metadata = {"display_text": "Finished syncing the workspace"}
 
     assert server._admit_prompt_turn(
-        "sid", session, "process completed", None, None, "process_complete", display_metadata,
+        "sid", session, "process completed", None, None, "process_complete",
+        display_metadata, expected_turn_id="synthetic-turn",
     ) == ([], agent)
 
     snapshot = server._inflight_snapshot(session)
@@ -18776,7 +18795,7 @@ def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
     turns = []
     emitted = []
 
-    def _fake_run_prompt_submit(rid, sid, session, text):
+    def _fake_run_prompt_submit(rid, sid, session, text, **_kwargs):
         turns.append(text)
         with session["history_lock"]:
             session["running"] = False

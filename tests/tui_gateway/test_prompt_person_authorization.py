@@ -223,7 +223,9 @@ def test_personal_submit_thread_start_failure_terminally_releases_admission(monk
 
     monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
     monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: None)
-    monkeypatch.setattr(srv, "_persist_session_row_for_submit", lambda *_args: None)
+    monkeypatch.setattr(
+        srv, "_persist_session_row_for_submit", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(srv, "_restart_completed_failed_agent_build", lambda *_args: True)
     monkeypatch.setattr(srv.threading, "Thread", FailingThread)
     monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
@@ -326,7 +328,9 @@ def test_expired_queued_head_does_not_block_later_static_prompt(monkeypatch):
     assert srv._drain_queued_prompt("r", "sid", session) is True
 
     assert [text for text, _kwargs in dispatched] == ["ordinary work"]
-    assert "turn_authorization" not in dispatched[0][1]
+    ordinary_authorization = dispatched[0][1]["turn_authorization"]
+    assert ordinary_authorization.is_personal is False
+    assert ordinary_authorization.has_token is False
     assert any(
         "expired" in args[2]["message"]
         for args in events
@@ -733,6 +737,234 @@ def test_personal_same_principal_prompts_are_never_merged_or_deduplicated():
     ]
 
 
+@pytest.mark.parametrize("failure", ["marker", "finalizer"])
+def test_prompt_worker_failure_always_releases_generation(
+    monkeypatch, tmp_path, failure
+):
+    holder = TurnAuthorization.from_raw(None)
+    agent = types.SimpleNamespace(
+        session_id="a",
+        run_conversation=lambda prompt, **_kwargs: {
+            "final_response": "ok",
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+        },
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="failure-turn",
+        _active_turn_authorization=holder,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    for name in (
+        "_wire_callbacks",
+        "_sync_agent_model_with_config",
+        "_register_session_cwd",
+        "_tts_stream_begin",
+        "_sync_session_key_after_compress",
+    ):
+        monkeypatch.setattr(srv, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(srv, "_get_usage", lambda _agent: {})
+    if failure == "marker":
+        monkeypatch.setattr(
+            srv,
+            "_record_turn_marker",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("marker unavailable")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            srv,
+            "_finish_turn",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("tts sentinel failed")
+            ),
+        )
+        monkeypatch.setattr(
+            srv,
+            "_hook_failure",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("diagnostic sink failed")
+            ),
+        )
+
+    assert srv._run_prompt_submit(
+        "r", "sid", session, "hello",
+        turn_authorization=holder, expected_turn_id="failure-turn",
+    )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+    assert "_run_thread" not in session
+    assert "_run_thread_turn_id" not in session
+
+
+@pytest.mark.parametrize("failure", ["transport", "started_event"])
+def test_worker_setup_failure_releases_admitted_generation(
+    monkeypatch, tmp_path, failure
+):
+    holder = TurnAuthorization.from_raw(None)
+    agent = types.SimpleNamespace(session_id="a", clear_interrupt=lambda: None)
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="bind-failure-turn",
+        _active_turn_authorization=holder,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    if failure == "transport":
+        monkeypatch.setattr(
+            srv,
+            "bind_transport",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("transport binding failed")
+            ),
+        )
+    else:
+        real_admission_emit = srv._emit_person_admission
+
+        def fail_started(*args, **kwargs):
+            if args[2] == "started":
+                raise RuntimeError("started admission event failed")
+            return real_admission_emit(*args, **kwargs)
+
+        monkeypatch.setattr(srv, "_emit_person_admission", fail_started)
+
+    assert srv._run_prompt_submit(
+        "r",
+        "sid",
+        session,
+        "hello",
+        turn_authorization=holder,
+        expected_turn_id="bind-failure-turn",
+    )
+    with session["history_lock"]:
+        worker = session.get("_run_thread")
+    if worker is not None:
+        worker.join(timeout=5.0)
+    for _ in range(100):
+        with session["history_lock"]:
+            if "_run_thread" not in session:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("failed setup worker did not exit")
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_followup_diagnostic_failure_releases_exact_generation(monkeypatch):
+    authorization = TurnAuthorization.from_raw(None)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        running=True,
+        _active_turn_id="followup-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("followup dispatch failed")
+        ),
+    )
+    monkeypatch.setattr(
+        srv,
+        "_hook_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("diagnostic failed")
+        ),
+    )
+
+    srv._dispatch_followup_turn(
+        "rid",
+        "sid",
+        session,
+        "follow up",
+        "goal followup",
+        expected_turn_id="followup-turn",
+        turn_authorization=authorization,
+    )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_worker_revalidates_generation_after_marker_publication(monkeypatch):
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="6" * 32)
+    agent = types.SimpleNamespace(clear_interrupt=lambda: None)
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=old_authorization,
+        _active_turn_route="inline",
+    )
+    prepared = []
+
+    monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(srv, "_ensure_session_db_row", lambda *_args: True)
+    monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_emit_person_admission", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_finish_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_retire_turn_marker", lambda *_args, **_kwargs: None)
+
+    def stale_marker(*_args, **_kwargs):
+        with session["history_lock"]:
+            session.update(
+                running=True,
+                _active_turn_id="new-turn",
+                _active_turn_authorization=new_authorization,
+                _active_turn_route="inline",
+                _active_turn_marker_key="new-marker",
+            )
+            srv._start_inflight_turn(session, "new prompt")
+        return "old-marker"
+
+    monkeypatch.setattr(srv, "_record_turn_marker", stale_marker)
+    monkeypatch.setattr(
+        srv,
+        "_prepare_turn_input",
+        lambda *_args, **_kwargs: prepared.append("old") or None,
+    )
+
+    assert srv._run_prompt_submit(
+        "rid",
+        "sid",
+        session,
+        "old prompt",
+        turn_authorization=old_authorization,
+        expected_turn_id="old-turn",
+    )
+
+    assert prepared == []
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+    assert session["_active_turn_marker_key"] == "new-marker"
+    assert session["inflight_turn"]["user"] == "new prompt"
+
+
 def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
     holder = _authorization("error-person")
     events = []
@@ -774,6 +1006,306 @@ def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
             },
         ),
     ]
+
+
+def test_old_turn_finalizer_preserves_new_turn_owned_state(monkeypatch, tmp_path):
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="f" * 32)
+    finish_entered = threading.Event()
+    finish_release = threading.Event()
+    agent = types.SimpleNamespace(
+        session_id="a",
+        run_conversation=lambda prompt, **_kwargs: {
+            "final_response": "ok",
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+        },
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=old_authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    for name in (
+        "_wire_callbacks",
+        "_sync_agent_model_with_config",
+        "_register_session_cwd",
+        "_tts_stream_begin",
+        "_sync_session_key_after_compress",
+    ):
+        monkeypatch.setattr(srv, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(srv, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(srv, "_record_turn_marker", lambda *_args, **_kwargs: "same-key")
+    monkeypatch.setattr(srv, "_retire_turn_marker", lambda *_args, **_kwargs: None)
+    real_finish = srv._finish_turn
+
+    def blocking_finish(*args, **kwargs):
+        finish_entered.set()
+        assert finish_release.wait(timeout=5.0)
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(srv, "_finish_turn", blocking_finish)
+
+    assert srv._run_prompt_submit(
+        "r",
+        "sid",
+        session,
+        "old prompt",
+        turn_authorization=old_authorization,
+        expected_turn_id="old-turn",
+    )
+    old_thread = session["_run_thread"]
+    assert finish_entered.wait(timeout=5.0)
+    with session["history_lock"]:
+        session.update(
+            running=True,
+            _active_turn_id="new-turn",
+            _active_turn_authorization=new_authorization,
+            _active_turn_route="inline",
+            _active_turn_marker_key="same-key",
+            _hosted_room_task={"task_id": "new-task"},
+            _auto_continue_scheduled=True,
+        )
+    finish_release.set()
+    old_thread.join(timeout=5.0)
+
+    assert not old_thread.is_alive()
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_marker_key"] == "same-key"
+    assert session["_hosted_room_task"] == {"task_id": "new-task"}
+    assert session["_auto_continue_scheduled"] is True
+
+
+def test_inline_finalizer_keeps_admission_closed_through_settled_effects(
+    monkeypatch, tmp_path
+):
+    authorization = TurnAuthorization.from_raw(None)
+    marker_entered = threading.Event()
+    marker_release = threading.Event()
+    settled_turn_ids = []
+    agent = types.SimpleNamespace(
+        session_id="a",
+        run_conversation=lambda prompt, **_kwargs: {
+            "final_response": "ok",
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+        },
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    for name in (
+        "_wire_callbacks",
+        "_sync_agent_model_with_config",
+        "_register_session_cwd",
+        "_tts_stream_begin",
+        "_sync_session_key_after_compress",
+    ):
+        monkeypatch.setattr(srv, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(srv, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(
+        srv, "_record_turn_marker", lambda *_args, **_kwargs: "old-marker"
+    )
+
+    retire_calls = []
+
+    def blocking_retire(*_args, **_kwargs):
+        retire_calls.append(True)
+        if len(retire_calls) == 2:
+            marker_entered.set()
+            assert marker_release.wait(5.0)
+
+    monkeypatch.setattr(srv, "_retire_turn_marker", blocking_retire)
+    monkeypatch.setattr(
+        srv,
+        "_emit_settled_session_info",
+        lambda _sid, current, _agent, **_kwargs: settled_turn_ids.append(
+            current.get("_active_turn_id")
+        ),
+    )
+
+    assert srv._run_prompt_submit(
+        "rid",
+        "sid",
+        session,
+        "prompt",
+        turn_authorization=authorization,
+        expected_turn_id="old-turn",
+    )
+    worker = session["_run_thread"]
+    assert marker_entered.wait(5.0)
+
+    assert srv._notif_claim_turn(session) is None
+    assert session["_active_turn_id"] == "old-turn"
+    marker_release.set()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert settled_turn_ids == ["old-turn"]
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+
+
+def test_inline_completion_interrupt_effects_run_before_idle(monkeypatch, tmp_path):
+    authorization = TurnAuthorization.from_raw(None)
+    finish_entered = threading.Event()
+    finish_release = threading.Event()
+    interrupt_results = []
+    tts_turn_ids = []
+    agent = types.SimpleNamespace(
+        session_id="a",
+        run_conversation=lambda prompt, **_kwargs: {
+            "final_response": "ok",
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+        },
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    for name in (
+        "_wire_callbacks",
+        "_sync_agent_model_with_config",
+        "_register_session_cwd",
+        "_tts_stream_begin",
+        "_sync_session_key_after_compress",
+    ):
+        monkeypatch.setattr(srv, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(srv, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(srv, "_record_turn_marker", lambda *_args, **_kwargs: "marker")
+    monkeypatch.setattr(srv, "_retire_turn_marker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        srv,
+        "_tts_stream_stop",
+        lambda: tts_turn_ids.append(session.get("_active_turn_id")),
+    )
+    real_finish = srv._finish_turn
+
+    def blocking_finish(*args, **kwargs):
+        finish_entered.set()
+        assert finish_release.wait(5.0)
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(srv, "_finish_turn", blocking_finish)
+    assert srv._run_prompt_submit(
+        "rid",
+        "sid",
+        session,
+        "prompt",
+        turn_authorization=authorization,
+        expected_turn_id="old-turn",
+    )
+    worker = session["_run_thread"]
+    assert finish_entered.wait(5.0)
+    interrupter = threading.Thread(
+        target=lambda: interrupt_results.append(
+            srv._interrupt_session_turn("sid", session, stop_tts=True)
+        )
+    )
+    interrupter.start()
+    for _ in range(100):
+        with session["history_lock"]:
+            if session["_turn_completion_claim"].get("stop_tts"):
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("interrupt did not join inline completion claim")
+    finish_release.set()
+    worker.join(timeout=5.0)
+    interrupter.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert not interrupter.is_alive()
+    assert interrupt_results == [False]
+    assert tts_turn_ids == ["old-turn"]
+    assert session["running"] is False
+    assert "_turn_completion_claim" not in session
+
+
+def test_inline_completion_claim_settles_when_hosted_slot_release_fails(
+    monkeypatch, tmp_path
+):
+    authorization = TurnAuthorization.from_raw(None)
+    captured_claims = []
+    agent = types.SimpleNamespace(
+        session_id="a",
+        run_conversation=lambda prompt, **_kwargs: {
+            "final_response": "ok",
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+        },
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="release-failure-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    for name in (
+        "_wire_callbacks",
+        "_sync_agent_model_with_config",
+        "_register_session_cwd",
+        "_tts_stream_begin",
+        "_sync_session_key_after_compress",
+    ):
+        monkeypatch.setattr(srv, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(srv, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(srv, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(srv, "_record_turn_marker", lambda *_args, **_kwargs: "marker")
+    monkeypatch.setattr(srv, "_retire_turn_marker", lambda *_args, **_kwargs: None)
+
+    def fail_release(current):
+        captured_claims.append(current["_turn_completion_claim"])
+        raise RuntimeError("hosted slot release failed")
+
+    monkeypatch.setattr(srv, "_release_hosted_room_turn_slot", fail_release)
+    assert srv._run_prompt_submit(
+        "rid",
+        "sid",
+        session,
+        "prompt",
+        turn_authorization=authorization,
+        expected_turn_id="release-failure-turn",
+    )
+    with session["history_lock"]:
+        worker = session.get("_run_thread")
+    if worker is not None:
+        worker.join(timeout=5.0)
+
+    assert captured_claims
+    assert captured_claims[0]["event"].is_set()
+    assert "_turn_completion_claim" not in session
 
 
 def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypatch):
@@ -864,6 +1396,37 @@ def test_failed_queued_personal_dispatch_drops_retired_admission(monkeypatch):
     assert session["running"] is False
     assert session.get("queued_prompt") is None
     assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_queued_dispatch_diagnostic_failure_restores_claim_and_releases_turn(
+    monkeypatch,
+):
+    holder = TurnAuthorization.from_raw(None)
+    queued = {"text": "retry me", "transport": None, "turn_authorization": holder}
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = queued
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("dispatch failed")
+        ),
+    )
+    monkeypatch.setattr(
+        srv,
+        "_notif_log_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("diagnostic failed")
+        ),
+    )
+
+    assert srv._drain_queued_prompt("drain", "sid", session) is True
+
+    assert session["running"] is False
+    assert session["queued_prompt"] is queued
+    assert "_active_turn_id" not in session
     assert "_active_turn_route" not in session
 
 
@@ -998,9 +1561,11 @@ def test_interrupt_terminally_accounts_each_queued_personal_admission_once(
     session = _session(types.SimpleNamespace(interrupt=lambda: None))
     session.update(
         running=True,
+        _active_turn_id="active-person-turn",
         _active_turn_authorization=active,
         _active_turn_route="inline",
         _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+        _run_thread_turn_id="active-person-turn",
         queued_prompt={
             "text": "queued-0", "transport": None,
             "turn_authorization": queued[0],
@@ -1231,6 +1796,8 @@ def test_direct_session_redirect_fails_closed_for_personal_turn(monkeypatch):
 
 def test_direct_session_interrupt_fails_closed_for_personal_turn(monkeypatch):
     session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    tts_stops = []
+    monkeypatch.setattr(srv, "_tts_stream_stop", lambda: tts_stops.append(True))
     try:
         response = srv._methods["session.interrupt"]("r", {"session_id": "sid"})
     finally:
@@ -1238,11 +1805,1483 @@ def test_direct_session_interrupt_fails_closed_for_personal_turn(monkeypatch):
 
     assert response["error"]["code"] == 4125
     assert calls["interrupt"] == []
+    assert tts_stops == []
     assert session["running"] is True
     assert "_active_turn_authorization" in session
 
 
-def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypatch):
+def test_rejected_personal_interrupt_does_not_start_pending_agent_build(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["agent"] = None
+    session["agent_ready"] = threading.Event()
+    starts = []
+    monkeypatch.setattr(
+        srv, "_start_agent_build", lambda *args, **kwargs: starts.append((args, kwargs))
+    )
+    try:
+        response = srv._methods["session.interrupt"]("r", {"session_id": "sid"})
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["error"]["code"] == 4125
+    assert starts == []
+    assert calls["interrupt"] == []
+    assert "agent_build_started" not in session
+    assert "_agent_build_thread" not in session
+    assert session["running"] is True
+
+
+def test_direct_interrupt_never_enters_agent_build_resolver(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["agent"] = None
+    session["agent_ready"] = threading.Event()
+    session["_active_turn_authorization"] = TurnAuthorization.from_raw(None)
+    resolved = []
+
+    def forbidden_resolver(*args, **kwargs):
+        resolved.append((args, kwargs))
+        raise AssertionError("session.interrupt must not warm an agent build")
+
+    monkeypatch.setattr(srv, "_sess", forbidden_resolver)
+    try:
+        response = srv._methods["session.interrupt"]("r", {"session_id": "sid"})
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["result"]["status"] == "interrupted"
+    assert resolved == []
+    assert calls["interrupt"] == []
+
+
+def test_interrupt_claims_tts_and_marker_before_new_personal_generation(monkeypatch):
+    session, _calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_active_turn_authorization"] = TurnAuthorization.from_raw(None)
+    session["_active_turn_marker_key"] = "old-turn-key"
+    tts_stops = []
+    retired = []
+    monkeypatch.setattr(srv, "_tts_stream_stop", lambda: tts_stops.append(True))
+    monkeypatch.setattr(
+        srv,
+        "_retire_turn_marker",
+        lambda _session, *keys, **_kwargs: retired.extend(keys),
+    )
+    original_interrupt = srv._interrupt_session_turn
+
+    def interrupt_then_admit_personal(*args, **kwargs):
+        result = original_interrupt(*args, **kwargs)
+        with session["history_lock"]:
+            session["running"] = True
+            session["_active_turn_authorization"] = _authorization("new-person")
+            session["_active_turn_marker_key"] = "new-person-key"
+        return result
+
+    monkeypatch.setattr(srv, "_interrupt_session_turn", interrupt_then_admit_personal)
+    try:
+        response = srv._methods["session.interrupt"]("r", {"session_id": "sid"})
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["result"]["status"] == "interrupted"
+    assert tts_stops == [True]
+    assert retired == ["old-turn-key", "agent-session-key"]
+    assert session["_active_turn_marker_key"] == "new-person-key"
+    assert session["_active_turn_authorization"].is_personal
+
+
+def test_expected_hosted_task_is_checked_at_interrupt_claim(monkeypatch):
+    session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    session["_active_turn_authorization"] = TurnAuthorization.from_raw(None)
+    session["_hosted_room_task"] = {"task_id": "expected-old"}
+    original_interrupt = srv._interrupt_session_turn
+
+    def replace_task_before_claim(*args, **kwargs):
+        with session["history_lock"]:
+            session["_hosted_room_task"] = {"task_id": "new-task"}
+        return original_interrupt(*args, **kwargs)
+
+    monkeypatch.setattr(srv, "_interrupt_session_turn", replace_task_before_claim)
+    try:
+        response = srv._methods["session.interrupt"](
+            "r",
+            {"session_id": "sid", "expected_hosted_task_id": "expected-old"},
+        )
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert response["result"] == {
+        "status": "not_interrupted",
+        "interrupted": False,
+    }
+    assert calls["interrupt"] == []
+    assert session["running"] is True
+
+
+def test_compute_submit_aborts_if_interrupt_won_after_admission(monkeypatch):
+    submitted = []
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="admitted-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="compute",
+        _turn_cancel_requested=True,
+    )
+    monkeypatch.setattr(
+        srv, "_load_dashboard_process_isolation_config", lambda: {}
+    )
+    monkeypatch.setattr(
+        srv,
+        "_get_compute_host_supervisor",
+        lambda _cfg=None: types.SimpleNamespace(
+            submit_turn=lambda *args, **kwargs: submitted.append((args, kwargs))
+        ),
+    )
+
+    response = srv._submit_prompt_to_compute_host(
+        "rid", "sid", session, "must not dispatch"
+    )
+
+    assert response["result"]["status"] == "streaming"
+    assert submitted == []
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+
+
+def test_compute_submit_allows_synchronous_success_callback(monkeypatch):
+    completed = []
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="sync-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="compute",
+    )
+
+    class Supervisor:
+        def submit_turn(self, _frame, *, on_complete=None):
+            assert on_complete is not None
+            on_complete({"type": "turn.end", "reason": "complete"})
+
+    monkeypatch.setattr(srv, "_load_dashboard_process_isolation_config", lambda: {})
+    monkeypatch.setattr(srv, "_get_compute_host_supervisor", lambda _cfg=None: Supervisor())
+    monkeypatch.setattr(
+        srv,
+        "_on_compute_host_turn_done",
+        lambda *_args, **_kwargs: completed.append(True),
+    )
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            srv._submit_prompt_to_compute_host("rid", "sid", session, "prompt")
+        )
+    )
+    worker.start()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert completed == [True]
+    assert result[0]["result"]["status"] == "streaming"
+
+
+def test_compute_completion_keeps_admission_closed_through_terminal_effects(monkeypatch):
+    authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _compute_host_turn_id="old-turn",
+        _active_turn_id="old-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="compute",
+    )
+    admission_attempts = []
+
+    def emit(event, *_args):
+        if event == "message.complete":
+            admission_attempts.append(srv._notif_claim_turn(session))
+
+    monkeypatch.setattr(srv, "_emit", emit)
+    monkeypatch.setattr(
+        srv, "_apply_compute_host_metadata_mirror", lambda *_args: None
+    )
+    monkeypatch.setattr(srv, "_compute_host_session_info", lambda *_args: {})
+    monkeypatch.setattr(srv, "_drain_queued_prompt", lambda *_args: False)
+
+    srv._on_compute_host_turn_done(
+        "rid", "sid", session,
+        {"type": "turn.error", "message": "old failure"},
+        expected_turn_id="old-turn",
+    )
+
+    assert admission_attempts == [None]
+    assert session["running"] is False
+    assert "_turn_completion_claim" not in session
+    assert srv._notif_claim_turn(session)
+
+
+def test_compute_completion_applies_interrupt_tts_before_publishing_idle(monkeypatch):
+    authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _compute_host_turn_id="old-turn",
+        _active_turn_id="old-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="compute",
+    )
+    real_threading = srv.threading
+    completion_started = threading.Event()
+    allow_completion = threading.Event()
+    effect_turn_ids = []
+
+    class AdmissionEvent:
+        def __init__(self):
+            self._event = threading.Event()
+
+        def wait(self, timeout=None):
+            return self._event.wait(timeout)
+
+        def set(self):
+            with session["history_lock"]:
+                session.update(
+                    running=True,
+                    _active_turn_id="new-turn",
+                    _active_turn_authorization=TurnAuthorization.from_raw(None),
+                    _active_turn_route="inline",
+                )
+            self._event.set()
+
+    monkeypatch.setattr(
+        srv,
+        "threading",
+        types.SimpleNamespace(
+            Event=AdmissionEvent,
+            get_ident=real_threading.get_ident,
+        ),
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+
+    def block_metadata(*_args):
+        completion_started.set()
+        assert allow_completion.wait(2.0)
+
+    monkeypatch.setattr(srv, "_apply_compute_host_metadata_mirror", block_metadata)
+    monkeypatch.setattr(srv, "_compute_host_session_info", lambda *_args: {})
+    monkeypatch.setattr(srv, "_drain_queued_prompt", lambda *_args: False)
+    monkeypatch.setattr(
+        srv,
+        "_tts_stream_stop",
+        lambda: effect_turn_ids.append(session.get("_active_turn_id")),
+    )
+
+    owner = threading.Thread(
+        target=lambda: srv._on_compute_host_turn_done(
+            "rid",
+            "sid",
+            session,
+            {"type": "turn.end"},
+            expected_turn_id="old-turn",
+        )
+    )
+    results = []
+    owner.start()
+    assert completion_started.wait(2.0)
+    waiter = threading.Thread(
+        target=lambda: results.append(
+            srv._interrupt_session_turn("sid", session, stop_tts=True)
+        )
+    )
+    waiter.start()
+    deadline = time.monotonic() + 2.0
+    while not session["_turn_completion_claim"].get("stop_tts"):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    allow_completion.set()
+    owner.join(timeout=2.0)
+    waiter.join(timeout=2.0)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert results == [True]
+    assert effect_turn_ids == ["old-turn"]
+    assert session["_active_turn_id"] == "new-turn"
+
+
+def test_completion_waiter_cannot_retarget_new_turn(monkeypatch):
+    event = threading.Event()
+    completion_claim = {
+        "turn_id": "old-turn",
+        "event": event,
+        "owner_thread_id": -1,
+    }
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="9" * 32)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=old_authorization,
+        _active_turn_route="compute",
+        _turn_completion_claim=completion_claim,
+        queued_prompt={"text": "next", "transport": None},
+        session_key="shared-key",
+    )
+    effects = []
+    monkeypatch.setattr(srv, "_tts_stream_stop", lambda: effects.append("tts"))
+    monkeypatch.setattr(
+        srv, "_retire_turn_marker",
+        lambda *_args, **_kwargs: effects.append("marker"),
+    )
+    results = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            srv._interrupt_session_turn(
+                "sid", session, stop_tts=True, retire_turn_marker=True
+            )
+        )
+    )
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while not completion_claim.get("stop_tts") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with session["history_lock"]:
+        session.pop("_turn_completion_claim", None)
+        session.update(
+            running=True,
+            _active_turn_id="new-turn",
+            _active_turn_authorization=new_authorization,
+            _active_turn_route="inline",
+        )
+    event.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert results == [True]
+    assert effects == []
+    assert completion_claim["stop_tts"] is True
+    assert completion_claim["retire_turn_marker"] is True
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+    assert session["queued_prompt"]["text"] == "next"
+
+
+def test_completion_interrupt_retires_marker_with_supported_arguments(monkeypatch):
+    session = _session(None)
+    session.update(
+        running=True,
+        session_key="old-key",
+        _compute_host_turn_id="old-turn",
+        _active_turn_id="old-turn",
+        _active_turn_route="compute",
+        _active_turn_marker_key="old-marker-key",
+    )
+    retired = []
+    interrupt_results = []
+
+    def retire(_session, *keys, include_current=True, expected_turn_id=None):
+        retired.append((keys, include_current, expected_turn_id))
+
+    def interrupt_during_completion(*_args):
+        interrupt_results.append(
+            srv._interrupt_session_turn(
+                "sid",
+                session,
+                retire_turn_marker=True,
+                expected_turn_id="old-turn",
+            )
+        )
+
+    monkeypatch.setattr(srv, "_retire_turn_marker", retire)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        srv, "_apply_compute_host_metadata_mirror", interrupt_during_completion
+    )
+    monkeypatch.setattr(srv, "_compute_host_session_info", lambda *_args: {})
+    monkeypatch.setattr(srv, "_drain_queued_prompt", lambda *_args: False)
+
+    srv._on_compute_host_turn_done(
+        "rid",
+        "sid",
+        session,
+        {"type": "turn.end"},
+        expected_turn_id="old-turn",
+    )
+
+    assert interrupt_results == [True]
+    assert retired == [
+        (("old-marker-key", "old-key"), False, "old-turn")
+    ]
+
+
+def test_compute_completion_exception_still_drains_queued_work(monkeypatch):
+    authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _compute_host_turn_id="old-turn",
+        _active_turn_id="old-turn",
+        _active_turn_authorization=authorization,
+        _active_turn_route="compute",
+        queued_prompt={"text": "next", "transport": None},
+    )
+    drained = []
+
+    monkeypatch.setattr(
+        srv, "_emit", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("terminal emit failed")
+        )
+    )
+    monkeypatch.setattr(
+        srv, "_drain_queued_prompt", lambda *_args: drained.append(True)
+    )
+
+    with pytest.raises(RuntimeError, match="terminal emit failed"):
+        srv._on_compute_host_turn_done(
+            "rid", "sid", session,
+            {"type": "turn.error", "message": "failed"},
+            expected_turn_id="old-turn",
+        )
+
+    assert drained == [True]
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_turn_completion_claim" not in session
+
+
+def test_queue_rejection_emit_failure_restores_valid_claim(monkeypatch):
+    expired = _authorization("expired", expires_at=time.time() - 1)
+    ordinary = TurnAuthorization.from_raw(None)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        queued_prompt={
+            "text": "expired",
+            "transport": None,
+            "turn_authorization": expired,
+        },
+        queued_prompts=[{
+            "text": "valid",
+            "transport": None,
+            "turn_authorization": ordinary,
+        }],
+    )
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(srv, "_emit_person_admission", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        srv, "_emit", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("error emit failed")
+        )
+    )
+    monkeypatch.setattr(srv, "_notif_log_failure", lambda *_args: None)
+
+    assert srv._drain_queued_prompt("rid", "sid", session)
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert session["queued_prompt"]["text"] == "valid"
+    assert session["queued_prompt"]["turn_authorization"] is ordinary
+
+
+def test_stale_queued_compute_failure_preserves_new_turn(monkeypatch):
+    queued_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="7" * 32)
+    session = _session(None)
+    session.update(
+        queued_prompt={
+            "text": "queued",
+            "transport": None,
+            "turn_authorization": queued_authorization,
+        }
+    )
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: True)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+
+    def failed_old_dispatch(*_args, **_kwargs):
+        with session["history_lock"]:
+            session.update(
+                running=True,
+                _active_turn_id="new-turn",
+                _active_turn_authorization=new_authorization,
+                _active_turn_route="inline",
+            )
+            srv._start_inflight_turn(session, "new prompt")
+        return {"error": {"message": "old dispatch failed"}}
+
+    monkeypatch.setattr(srv, "_submit_prompt_to_compute_host", failed_old_dispatch)
+
+    assert srv._drain_queued_prompt("rid", "sid", session)
+
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+    assert session["inflight_turn"]["user"] == "new prompt"
+
+
+def test_prompt_admission_revalidates_after_blocking_owner_claim(monkeypatch):
+    cleared = []
+    agent = types.SimpleNamespace(clear_interrupt=lambda: cleared.append(True))
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="e" * 32)
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=old_authorization,
+        _active_turn_route="inline",
+        attached_images=["old.png"],
+    )
+
+    def ownership_claim(_sid, _session):
+        with session["history_lock"]:
+            session.update(
+                running=True,
+                _active_turn_id="new-turn",
+                _active_turn_authorization=new_authorization,
+                _active_turn_route="inline",
+                attached_images=["new-turn.png"],
+                inflight_turn={"user": "new prompt"},
+            )
+        return None
+
+    monkeypatch.setattr(srv, "_ensure_active_session_slot", ownership_claim)
+
+    admitted = srv._admit_prompt_turn(
+        "sid", session, "old prompt", None, None, None, None,
+        old_authorization, expected_turn_id="old-turn",
+    )
+
+    assert admitted is None
+    assert cleared == []
+    assert session["attached_images"] == ["new-turn.png"]
+    assert session["inflight_turn"] == {"user": "new prompt"}
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+
+
+def test_missing_agent_terminal_error_cannot_fail_newer_inflight(monkeypatch):
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="8" * 32)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=old_authorization,
+        _active_turn_route="inline",
+    )
+    monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: None)
+    real_terminal_error = srv._emit_terminal_turn_error
+    running_at_terminal = []
+
+    def replace_before_terminal(*args, **kwargs):
+        running_at_terminal.append(session["running"])
+        with session["history_lock"]:
+            session.update(
+                running=True,
+                _active_turn_id="new-turn",
+                _active_turn_authorization=new_authorization,
+                _active_turn_route="inline",
+            )
+            srv._start_inflight_turn(session, "new prompt")
+        return real_terminal_error(*args, **kwargs)
+
+    monkeypatch.setattr(srv, "_emit_terminal_turn_error", replace_before_terminal)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+
+    assert srv._admit_prompt_turn(
+        "sid",
+        session,
+        "old prompt",
+        None,
+        None,
+        None,
+        None,
+        old_authorization,
+        expected_turn_id="old-turn",
+    ) is None
+
+    assert running_at_terminal == [True]
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+    assert session["inflight_turn"]["user"] == "new prompt"
+    assert session["inflight_turn"].get("status") != "error"
+
+
+def test_stale_compute_submit_cannot_relabel_payload_as_new_turn(monkeypatch):
+    sent = []
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="new-turn",
+        _active_turn_authorization=new_authorization,
+        _active_turn_route="compute",
+        _turn_cancel_requested=False,
+    )
+    monkeypatch.setattr(srv, "_load_dashboard_process_isolation_config", lambda: {})
+    monkeypatch.setattr(
+        srv,
+        "_get_compute_host_supervisor",
+        lambda _cfg=None: types.SimpleNamespace(
+            submit_turn=lambda frame, **_kwargs: sent.append(frame)
+        ),
+    )
+
+    response = srv._submit_prompt_to_compute_host(
+        "rid", "sid", session, "OLD QUEUED TEXT",
+        expected_turn_id="old-turn",
+        expected_turn_authorization=old_authorization,
+    )
+
+    assert response["result"]["status"] == "streaming"
+    assert sent == []
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+
+
+def test_stale_compute_completion_cannot_clear_new_turn(monkeypatch):
+    new_authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _compute_host_turn_id="new-turn",
+        _active_turn_id="new-turn",
+        _active_turn_authorization=new_authorization,
+        _active_turn_route="compute",
+    )
+    emitted = []
+    monkeypatch.setattr(srv, "_emit", lambda *args: emitted.append(args))
+
+    srv._on_compute_host_turn_done(
+        "rid", "sid", session, {"type": "turn.end"},
+        expected_turn_id="old-turn",
+    )
+
+    assert emitted == []
+    assert session["running"] is True
+    assert session["_compute_host_turn_id"] == "new-turn"
+    assert session["_active_turn_id"] == "new-turn"
+
+
+def test_stale_persist_failure_cannot_clear_new_person_turn(monkeypatch):
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="d" * 32)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="new-turn",
+        _active_turn_authorization=new_authorization,
+        _active_turn_route="inline",
+        _hosted_room_task={"id": "new-task"},
+        inflight_turn={"user": "new prompt"},
+    )
+    monkeypatch.setattr(
+        srv, "_ensure_session_db_row",
+        lambda _session: (_ for _ in ()).throw(OSError("storage failed")),
+    )
+
+    error = srv._persist_session_row_for_submit(
+        "rid", session, expected_turn_id="old-turn",
+        expected_authorization=old_authorization,
+    )
+
+    assert error["error"]["code"] == 5071
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+    assert session["_hosted_room_task"] == {"id": "new-task"}
+    assert session["inflight_turn"] == {"user": "new prompt"}
+
+
+def test_stale_notification_release_cannot_clear_new_turn():
+    new_authorization = TurnAuthorization.from_raw(None)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="new-turn",
+        _active_turn_authorization=new_authorization,
+        _active_turn_route="inline",
+    )
+
+    srv._notif_release_turn(session, "old-turn")
+
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+
+
+def test_notification_delivery_claim_loss_releases_exact_turn(monkeypatch):
+    from tools import async_delegation
+
+    session = _session(None)
+    turn_id = srv._notif_claim_turn(session)
+    monkeypatch.setattr(
+        async_delegation, "claim_event_delivery", lambda *_args: None
+    )
+
+    srv._notif_dispatch_event(
+        "sid", session, {"type": "async_delegation"}, "done", turn_id
+    )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_notification_delivery_claim_exception_releases_exact_turn(monkeypatch):
+    from tools import async_delegation
+
+    session = _session(None)
+    turn_id = srv._notif_claim_turn(session)
+    monkeypatch.setattr(
+        async_delegation,
+        "claim_event_delivery",
+        lambda *_args: (_ for _ in ()).throw(OSError("claim unavailable")),
+    )
+
+    srv._notif_dispatch_event(
+        "sid", session, {"type": "async_delegation"}, "done", turn_id
+    )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_slash_loop_send_exception_releases_new_identity(monkeypatch):
+    session = _session(None)
+    original_turn_id = srv._notif_claim_turn(session)
+    mgr = types.SimpleNamespace()
+    monkeypatch.setitem(
+        srv._methods,
+        "command.dispatch",
+        lambda *_args: {"result": {"type": "send", "message": "follow-up"}},
+    )
+    monkeypatch.setattr(
+        srv, "_emit", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("message.start failed")
+        )
+    )
+
+    assert not srv._notif_slash_loop_tick(
+        "rid", "sid", session, mgr, "/status", original_turn_id
+    )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_notification_ack_failure_keeps_dispatched_turn_owned(monkeypatch):
+    from tools import async_delegation
+
+    session = _session(None)
+    turn_id = srv._notif_claim_turn(session)
+    released = []
+    claim = object()
+    monkeypatch.setattr(
+        async_delegation, "claim_event_delivery", lambda *_args: claim
+    )
+    monkeypatch.setattr(
+        async_delegation,
+        "complete_event_delivery",
+        lambda *_args: (_ for _ in ()).throw(OSError("ack unavailable")),
+    )
+    monkeypatch.setattr(
+        async_delegation,
+        "release_event_delivery",
+        lambda *_args: released.append(True),
+    )
+    monkeypatch.setattr(srv, "_notif_submit", lambda *_args, **_kwargs: None)
+
+    srv._notif_dispatch_event(
+        "sid", session, {"type": "async_delegation"}, "done", turn_id
+    )
+
+    assert released == []
+    assert session["running"] is True
+    assert session["_active_turn_id"] == turn_id
+
+
+def test_completion_batch_ack_failure_keeps_dispatched_turn_owned(monkeypatch):
+    from tools import async_delegation
+    from tools import process_registry_notifications as notifications_module
+
+    session = _session(None)
+    released = []
+    claim = object()
+
+    class Batch:
+        def __init__(self, _items):
+            pass
+
+        def render(self, _registry):
+            return "batch"
+
+        def display_text(self, _registry):
+            return "batch display"
+
+    monkeypatch.setattr(notifications_module, "ProcessNotificationBatch", Batch)
+    monkeypatch.setattr(
+        async_delegation, "claim_event_delivery", lambda *_args: claim
+    )
+    monkeypatch.setattr(
+        async_delegation,
+        "complete_event_delivery",
+        lambda *_args: (_ for _ in ()).throw(OSError("ack unavailable")),
+    )
+    monkeypatch.setattr(
+        async_delegation,
+        "release_event_delivery",
+        lambda *_args: released.append(True),
+    )
+    monkeypatch.setattr(srv, "_notif_submit", lambda *_args, **_kwargs: None)
+
+    srv._notif_dispatch_completions(
+        "sid",
+        session,
+        [({"type": "completion"}, "done")],
+        types.SimpleNamespace(),
+        None,
+    )
+
+    assert released == []
+    assert session["running"] is True
+    assert session.get("_active_turn_id")
+
+
+def test_notification_logging_failure_still_releases_failed_dispatch(monkeypatch):
+    session = _session(None)
+    turn_id = srv._notif_claim_turn(session)
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("dispatch failed")
+        ),
+    )
+    monkeypatch.setattr(
+        srv,
+        "_notif_log_failure",
+        lambda *_args: (_ for _ in ()).throw(OSError("diagnostic failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="dispatch failed"):
+        srv._notif_submit(
+            "rid",
+            "sid",
+            session,
+            "notification",
+            "notification failed",
+            expected_turn_id=turn_id,
+        )
+
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_route" not in session
+
+
+@pytest.mark.parametrize("kind", ["heartbeat", "loop"])
+def test_autonomous_tick_storage_failure_releases_claim(monkeypatch, kind):
+    session = _session(None)
+    session["session_key"] = "tick-session"
+    abandoned = []
+
+    if kind == "heartbeat":
+        import hermes_cli.heartbeat as module
+
+        class State:
+            fire_count = 1
+
+            @staticmethod
+            def is_due():
+                return True
+
+        class Manager:
+            state = State()
+
+            def __init__(self, **_kwargs):
+                pass
+
+            @staticmethod
+            def is_active():
+                return True
+
+            @staticmethod
+            def due_prompt():
+                raise OSError("heartbeat state unavailable")
+
+            @staticmethod
+            def abandon_fire():
+                abandoned.append("heartbeat")
+
+        monkeypatch.setattr(module, "HeartbeatManager", Manager)
+        monkeypatch.setattr(
+            srv, "_notif_gateway_owns_heartbeat", lambda *_args: False
+        )
+        srv._maybe_fire_tui_heartbeat_tick("sid", session)
+    else:
+        import hermes_cli.loops as module
+
+        class State:
+            route = None
+
+        class Manager:
+            state = State()
+
+            def __init__(self, **_kwargs):
+                pass
+
+            @staticmethod
+            def is_due():
+                return True
+
+            @staticmethod
+            def fire_tick():
+                raise OSError("loop state unavailable")
+
+            @staticmethod
+            def abandon_tick():
+                abandoned.append("loop")
+
+        monkeypatch.setattr(module, "LoopManager", Manager)
+        monkeypatch.setattr(module, "goal_blocks_loop_tick", lambda *_args: False)
+        srv._maybe_fire_tui_loop_tick("sid", session)
+
+    assert abandoned == [kind]
+    assert session["running"] is False
+    assert "_active_turn_id" not in session
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+
+
+def test_delayed_ready_worker_cannot_dispatch_inside_new_turn(monkeypatch):
+    dispatched = []
+    old_authorization = TurnAuthorization.from_raw(None)
+    new_authorization = _authorization("new-person", admission_id="d" * 32)
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="new-turn",
+        _active_turn_authorization=new_authorization,
+        _active_turn_route="inline",
+        _turn_cancel_requested=False,
+    )
+    monkeypatch.setattr(srv, "_wait_agent_for_prompt", lambda *_args: None)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: dispatched.append(True) or True,
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *_args, **_kwargs: None)
+
+    srv._run_after_agent_ready(
+        "rid",
+        "sid",
+        session,
+        "old prompt",
+        None,
+        None,
+        None,
+        old_authorization,
+        "old-turn",
+    )
+
+    assert dispatched == []
+    assert session["running"] is True
+    assert session["_active_turn_id"] == "new-turn"
+    assert session["_active_turn_authorization"] is new_authorization
+
+
+def test_busy_submit_waits_for_interrupt_claim_before_queueing(monkeypatch):
+    claim_event = threading.Event()
+    result = []
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _turn_interrupt_claim={"event": claim_event},
+    )
+    monkeypatch.setattr(srv, "_load_busy_input_mode", lambda: "queue")
+    worker = threading.Thread(
+        target=lambda: result.append(
+            srv._handle_busy_submit("rid", "sid", session, "new prompt", None)
+        )
+    )
+    worker.start()
+    worker.join(timeout=0.1)
+
+    assert worker.is_alive()
+    assert session.get("queued_prompt") is None
+    with session["history_lock"]:
+        session.pop("_turn_interrupt_claim", None)
+        session["running"] = False
+    claim_event.set()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    assert session.get("queued_prompt") is None
+
+
+def test_interrupt_claim_blocks_concurrent_personal_admission(monkeypatch):
+    entered_interrupt = threading.Event()
+    release_interrupt = threading.Event()
+
+    def blocking_interrupt():
+        entered_interrupt.set()
+        assert release_interrupt.wait(timeout=5.0)
+
+    session = _session(types.SimpleNamespace(interrupt=blocking_interrupt))
+    session.update(
+        running=True,
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+    worker = threading.Thread(
+        target=srv._interrupt_session_turn,
+        args=("sid", session),
+        kwargs={"reject_person_authorized": True},
+    )
+    worker.start()
+    assert entered_interrupt.wait(timeout=5.0)
+
+    with session["history_lock"]:
+        session["running"] = False
+        session.pop("_active_turn_authorization", None)
+    err, _fields = srv._lock_in_submit_turn(
+        "r",
+        "sid",
+        session,
+        "new personal turn",
+        {},
+        False,
+        None,
+        None,
+        None,
+        _authorization("new-person"),
+        False,
+    )
+
+    assert err is srv._SUBMIT_TURN_INTERRUPT_PENDING
+    assert session["running"] is False
+    assert "_active_turn_authorization" not in session
+
+    release_interrupt.set()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert "_turn_interrupt_claim" not in session
+
+
+def test_notification_turn_claim_mints_immutable_identity():
+    session = _session(types.SimpleNamespace())
+
+    assert srv._notif_claim_turn(session)
+
+    turn_id = session.get("_active_turn_id")
+    assert isinstance(turn_id, str)
+    assert len(turn_id) == 32
+
+
+def test_agent_interrupt_identity_is_bound_for_exact_gateway_turn(monkeypatch):
+    observed = []
+
+    class Agent:
+        def bind_gateway_turn(self, turn_id):
+            self.active_turn_id = turn_id
+
+        def clear_gateway_turn(self, turn_id):
+            if self.active_turn_id == turn_id:
+                self.active_turn_id = None
+
+        def run_conversation(self, *_args, **_kwargs):
+            observed.append(self.active_turn_id)
+            return {"final_response": "done", "messages": []}
+
+    agent = Agent()
+    session = _session(agent)
+    session["_active_turn_id"] = "gateway-turn"
+    monkeypatch.setattr(srv, "_load_interim_assistant_messages", lambda: False)
+    monkeypatch.setattr(
+        srv,
+        "_start_usage_ticker",
+        lambda *_args: (
+            types.SimpleNamespace(set=lambda: None),
+            types.SimpleNamespace(join=lambda: None),
+        ),
+    )
+    state = srv._TurnRun(
+        agent=agent,
+        one_turn_restore=None,
+        terminal_callback=None,
+        receipt_committed=True,
+    )
+
+    srv._invoke_agent(
+        "sid", session, state, "hello", "hello", None, [], None, None
+    )
+
+    assert observed == ["gateway-turn"]
+    assert agent.active_turn_id is None
+
+
+def test_tts_stop_failure_does_not_drop_queued_person_admission(monkeypatch):
+    queued = _authorization("queued-person", admission_id="b" * 32)
+    session = _session(types.SimpleNamespace(interrupt=lambda: None))
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+        queued_prompt={
+            "text": "queued",
+            "transport": None,
+            "turn_authorization": queued,
+        },
+    )
+    events = []
+    monkeypatch.setattr(
+        srv, "_tts_stream_stop", lambda: (_ for _ in ()).throw(RuntimeError("tts failed"))
+    )
+    monkeypatch.setattr(srv, "_emit", lambda *args, **_kwargs: events.append(args) or True)
+
+    assert srv._interrupt_session_turn("sid", session, stop_tts=True) is False
+
+    assert "_turn_interrupt_claim" not in session
+    assert session.get("queued_prompt") is None
+    assert (
+        "person.admission",
+        "sid",
+        {
+            "admission_id": "b" * 32,
+            "status": "terminal",
+            "reason": "interrupted_while_queued",
+        },
+    ) in events
+
+
+def test_turn_progress_does_not_invalidate_turn_bound_interrupt(monkeypatch):
+    calls = []
+
+    class Agent:
+        _turn_liveness_activity_generation = 7
+        _active_gateway_turn_id = "old-turn"
+
+        def bind_gateway_turn(self, turn_id):
+            self._active_gateway_turn_id = turn_id
+
+        def hard_interrupt(
+            self,
+            _message=None,
+            *,
+            require_generation=None,
+            require_turn_id=None,
+        ):
+            calls.append((require_generation, require_turn_id))
+            return require_generation is None and require_turn_id == "old-turn"
+
+    agent = Agent()
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+
+    srv._interrupt_session_turn("sid", session)
+
+    assert calls == [(None, "old-turn")]
+
+
+def test_internal_turn_admitted_after_claim_is_not_hard_interrupted(monkeypatch):
+    marker_entered = threading.Event()
+    marker_release = threading.Event()
+    hard_interrupts = []
+
+    class Agent:
+        _active_gateway_turn_id = "old-turn"
+
+        def bind_gateway_turn(self, turn_id):
+            self._active_gateway_turn_id = turn_id
+
+        def hard_interrupt(self, _message=None, *, require_turn_id=None):
+            if self._active_gateway_turn_id != require_turn_id:
+                return False
+            hard_interrupts.append(require_turn_id)
+            return True
+
+    agent = Agent()
+    session = _session(agent)
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _active_turn_marker_key="same-key",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+
+    def blocking_retire(*_args, **_kwargs):
+        marker_entered.set()
+        assert marker_release.wait(timeout=5.0)
+
+    monkeypatch.setattr(srv, "_retire_turn_marker", blocking_retire)
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+    worker = threading.Thread(
+        target=srv._interrupt_session_turn,
+        args=("sid", session),
+        kwargs={"retire_turn_marker": True},
+    )
+    worker.start()
+    assert marker_entered.wait(timeout=5.0)
+
+    with session["history_lock"]:
+        session["running"] = False
+        srv._clear_active_turn_state(session)
+    assert srv._notif_claim_turn(session) is None
+    assert "_active_turn_id" not in session
+    marker_release.set()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert hard_interrupts == ["old-turn"]
+    assert srv._notif_claim_turn(session)
+    new_turn_id = session["_active_turn_id"]
+    assert new_turn_id != "old-turn"
+
+
+def test_public_follower_upgrades_internal_interrupt_effects(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    tts_stops = []
+    retired = []
+    results = []
+
+    class Agent:
+        def bind_gateway_turn(self, _turn_id):
+            pass
+
+        def hard_interrupt(self, _message=None, *, require_turn_id=None):
+            assert require_turn_id == "shared-turn"
+            entered.set()
+            assert release.wait(timeout=5.0)
+            return True
+
+    session = _session(Agent())
+    session.update(
+        running=True,
+        session_key="shared-key",
+        _active_turn_id="shared-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _active_turn_marker_key="shared-key",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+    monkeypatch.setattr(srv, "_tts_stream_stop", lambda: tts_stops.append(True))
+    monkeypatch.setattr(
+        srv,
+        "_retire_turn_marker",
+        lambda *args, **kwargs: retired.append((args, kwargs)),
+    )
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+
+    owner = threading.Thread(
+        target=lambda: results.append(srv._interrupt_session_turn("sid", session))
+    )
+    follower = threading.Thread(
+        target=lambda: results.append(
+            srv._interrupt_session_turn(
+                "sid", session, stop_tts=True, retire_turn_marker=True
+            )
+        )
+    )
+    owner.start()
+    assert entered.wait(timeout=5.0)
+    follower.start()
+    follower.join(timeout=0.1)
+    assert follower.is_alive()
+    release.set()
+    owner.join(timeout=5.0)
+    follower.join(timeout=5.0)
+
+    assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert results == [False, False]
+    assert tts_stops == [True]
+    assert len(retired) == 1
+    assert retired[0][1]["expected_turn_id"] == "shared-turn"
+
+
+def test_follower_effect_upgrade_runs_after_marker_retirement_failure(monkeypatch):
+    marker_entered = threading.Event()
+    marker_release = threading.Event()
+    tts_stops = []
+    errors = []
+
+    class Agent:
+        def bind_gateway_turn(self, _turn_id):
+            pass
+
+        def hard_interrupt(self, _message=None, *, require_turn_id=None):
+            return require_turn_id == "shared-turn"
+
+    session = _session(Agent())
+    session.update(
+        running=True,
+        session_key="shared-key",
+        _active_turn_id="shared-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _active_turn_marker_key="shared-key",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+
+    def failing_retire(*_args, **_kwargs):
+        marker_entered.set()
+        assert marker_release.wait(timeout=5.0)
+        raise RuntimeError("marker failed")
+
+    monkeypatch.setattr(srv, "_retire_turn_marker", failing_retire)
+    monkeypatch.setattr(srv, "_tts_stream_stop", lambda: tts_stops.append(True))
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+
+    def interrupt(**kwargs):
+        try:
+            srv._interrupt_session_turn("sid", session, **kwargs)
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(
+        target=interrupt, kwargs={"retire_turn_marker": True}
+    )
+    follower = threading.Thread(target=interrupt, kwargs={"stop_tts": True})
+    owner.start()
+    assert marker_entered.wait(timeout=5.0)
+    follower.start()
+    follower.join(timeout=0.1)
+    assert follower.is_alive()
+    marker_release.set()
+    owner.join(timeout=5.0)
+    follower.join(timeout=5.0)
+
+    assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert tts_stops == [True]
+    assert len(errors) == 2
+
+
+def test_concurrent_interrupt_waits_for_owner_failure(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+
+    class Supervisor:
+        def interrupt(self, *_args, **_kwargs):
+            entered.set()
+            assert release.wait(timeout=5.0)
+            raise RuntimeError("compute interrupt failed")
+
+    session = _session(None)
+    session.update(
+        running=True,
+        _active_turn_id="compute-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="compute",
+        _compute_host_active=True,
+    )
+    monkeypatch.setattr(srv, "_get_compute_host_supervisor", lambda: Supervisor())
+
+    def interrupt():
+        try:
+            srv._interrupt_session_turn("sid", session)
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=interrupt)
+    follower = threading.Thread(target=interrupt)
+    owner.start()
+    assert entered.wait(timeout=5.0)
+    follower.start()
+    follower.join(timeout=0.1)
+    assert follower.is_alive()
+    release.set()
+    owner.join(timeout=5.0)
+    follower.join(timeout=5.0)
+
+    assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert len(errors) == 2
+    assert all("interrupt failed" in str(error) for error in errors)
+
+
+def test_concurrent_interrupt_propagates_post_claim_drain_failure(monkeypatch):
+    entered_clear = threading.Event()
+    release_clear = threading.Event()
+    errors = []
+    real_thread = threading.Thread
+
+    session = _session(types.SimpleNamespace(interrupt=lambda: None))
+    session.update(
+        running=True,
+        _active_turn_id="old-turn",
+        _active_turn_authorization=TurnAuthorization.from_raw(None),
+        _active_turn_route="inline",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+    )
+
+    def blocking_clear(*_args):
+        entered_clear.set()
+        assert release_clear.wait(timeout=5.0)
+
+    monkeypatch.setattr(srv, "_clear_pending", blocking_clear)
+
+    def interrupt():
+        try:
+            srv._interrupt_session_turn("sid", session)
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = real_thread(target=interrupt)
+    follower = real_thread(target=interrupt)
+    owner.start()
+    assert entered_clear.wait(timeout=5.0)
+    follower.start()
+    follower.join(timeout=0.1)
+    assert follower.is_alive()
+
+    with session["history_lock"]:
+        session["running"] = False
+        session["queued_prompt"] = {"text": "queued", "transport": None}
+
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("drain start failed")
+
+    monkeypatch.setattr(srv.threading, "Thread", BrokenThread)
+    release_clear.set()
+    owner.join(timeout=5.0)
+    follower.join(timeout=5.0)
+
+    assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert len(errors) == 2
+    assert all("failed" in str(error) for error in errors)
+
+
+def test_direct_session_interrupt_rejects_copied_active_person_authorization(monkeypatch):
     session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
     try:
         response = srv._methods["session.interrupt"](
@@ -1257,13 +3296,13 @@ def test_direct_session_interrupt_accepts_matching_person_authorization(monkeypa
     finally:
         srv._sessions.pop("sid", None)
 
-    assert response["result"]["status"] == "interrupted"
-    assert calls["interrupt"] == [True]
-    assert session["running"] is False
-    assert "_active_turn_authorization" not in session
+    assert response["error"]["code"] == 4125
+    assert calls["interrupt"] == []
+    assert session["running"] is True
+    assert "_active_turn_authorization" in session
 
 
-def test_reconnected_person_can_interrupt_active_turn_with_rotated_bearer(monkeypatch):
+def test_direct_session_interrupt_rejects_forged_same_principal(monkeypatch):
     session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
     session["_active_turn_authorization"] = _authorization(
         "person-token-t1", principal_id="a" * 64
@@ -1281,9 +3320,9 @@ def test_reconnected_person_can_interrupt_active_turn_with_rotated_bearer(monkey
     finally:
         srv._sessions.pop("sid", None)
 
-    assert response["result"]["status"] == "interrupted"
-    assert calls["interrupt"] == [True]
-    assert session["running"] is False
+    assert response["error"]["code"] == 4125
+    assert calls["interrupt"] == []
+    assert session["running"] is True
 
 
 def test_different_person_principal_cannot_interrupt_active_turn(monkeypatch):
@@ -1338,19 +3377,13 @@ def test_reconnected_person_queues_rotated_bearer_behind_owned_active_turn(monke
 
 def test_interrupt_keeps_personal_fence_until_live_worker_settles(monkeypatch):
     session, calls = _install_token_bearing_direct_rpc_session(monkeypatch)
+    with session["history_lock"]:
+        srv._activate_turn_identity(session)
     session["_run_thread"] = types.SimpleNamespace(is_alive=lambda: True)
+    session["_run_thread_turn_id"] = session["_active_turn_id"]
     holder = session["_active_turn_authorization"]
     try:
-        response = srv._methods["session.interrupt"](
-            "r",
-            {
-                "session_id": "sid",
-                "_fizko_person_access_token": "active-person",
-                "_fizko_person_access_token_expires_at": time.time() + 3600,
-                "_fizko_person_principal_id": "a" * 64,
-            },
-        )
-        assert response["result"]["status"] == "interrupted"
+        srv._interrupt_session_turn("sid", session)
         assert session["running"] is True
         assert session["_active_turn_authorization"] is holder
         assert srv._direct_personal_turn_mutation_error("next", session)["error"]["code"] == 4125

@@ -2924,7 +2924,7 @@
     },
     {
       "name": "session.interrupt",
-      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker. A personal turn requires its matching, unexpired per-turn bearer and expiry metadata.",
+      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker. Direct interruption is unavailable while a person-authorized turn is active; send an authenticated prompt.submit correction through the trusted admission rail.",
       "params": [
         {
           "name": "params",
@@ -25890,45 +25890,6 @@
             ],
             "default": null,
             "title": "Expected Hosted Task Id"
-          },
-          "_fizko_person_access_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Trusted per-person bearer matching the active personal turn.",
-            "title": "Fizko Person Access Token"
-          },
-          "_fizko_person_access_token_expires_at": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Unix expiry timestamp; required and must still be valid for a personal interrupt.",
-            "title": "Fizko Person Access Token Expires At"
-          },
-          "_fizko_person_principal_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Trusted stable opaque owner id matching the active personal turn.",
-            "title": "Fizko Person Principal Id"
           }
         },
         "required": [

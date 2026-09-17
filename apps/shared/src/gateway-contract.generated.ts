@@ -2870,9 +2870,6 @@ export interface SessionInterruptParams {
   session_id: string
   profile?: string | null
   expected_hosted_task_id?: string | null
-  _fizko_person_access_token?: string | null
-  _fizko_person_access_token_expires_at?: number | null
-  _fizko_person_principal_id?: string | null
 }
 export interface SessionInterruptResult {
   status: InterruptStatus
@@ -4512,7 +4509,7 @@ export interface RpcMethods {
   'session.foreign.preview': { params: SessionForeignIdParams; result: SessionForeignPreviewResult }
   /** The durable display transcript (ancestors included, row ids attached). */
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult }
-  /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. A personal turn requires its matching, unexpired per-turn bearer and expiry metadata. */
+  /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. Direct interruption is unavailable while a person-authorized turn is active; send an authenticated prompt.submit correction through the trusted admission rail. */
   'session.interrupt': { params: SessionInterruptParams; result: SessionInterruptResult }
   /** Human-facing stored sessions, most recent first (sub-agent / kanban sources denied). */
   'session.list': { params: SessionListParams; result: SessionListResult }

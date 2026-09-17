@@ -177,14 +177,41 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
     return True
 
 
-def _emit_settled_session_info(sid: str, session: dict, agent) -> None:
-    """Emit end-of-turn ``session.info``, reconciling a settled cwd first (the agent has stopped moving; riding the
-    turn-end event needs no new event type/round trip)."""
+def _emit_settled_session_info(
+    sid: str,
+    session: dict,
+    agent,
+    *,
+    expected_turn_id: str | None = None,
+) -> bool:
+    """Reconcile and publish an end-of-turn snapshot for the exact owner.
+
+    Callers keep the turn's completion claim installed until this returns.  The
+    snapshot reports ``running=False`` without publishing idle in shared state,
+    so no newer generation can be admitted between cwd reconciliation and the
+    terminal ``session.info`` event.
+    """
+    lock = session.get("history_lock") or contextlib.nullcontext()
+    with lock:
+        if (
+            expected_turn_id is not None
+            and session.get("_active_turn_id") != expected_turn_id
+        ):
+            return False
     try:
         _reconcile_session_cwd_from_terminal(session)
     except Exception:
         logger.debug("failed to reconcile settled session cwd", exc_info=True)
-    _emit("session.info", sid, _session_info(agent, session))
+    with lock:
+        if (
+            expected_turn_id is not None
+            and session.get("_active_turn_id") != expected_turn_id
+        ):
+            return False
+        settled_session = dict(session)
+        settled_session["running"] = False
+    _emit("session.info", sid, _session_info(agent, settled_session))
+    return True
 
 
 def _session_source(session: dict | None) -> str:

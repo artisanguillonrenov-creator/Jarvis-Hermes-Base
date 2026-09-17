@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import uuid
 from typing import Any
 
 from .method_ctx import bind_module
@@ -38,14 +39,23 @@ def _session_home(session: dict) -> Path:
     return Path(session.get("profile_home") or _hermes_home)
 
 
-def _retire_turn_marker(session: dict, *keys: str) -> None:
+def _retire_turn_marker(
+    session: dict,
+    *keys: str,
+    include_current: bool = True,
+    expected_turn_id: str | None = None,
+) -> None:
     """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work outlives the
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
-    cover a session_key that compression rotated mid-turn."""
+    cover a session_key that compression rotated mid-turn. Generation-bound callers pass every key captured while
+    claiming the turn and set ``include_current=False`` so a later turn's marker can never be retired."""
+    if not expected_turn_id:
+        return
     home = _session_home(session)
-    for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
+    candidates = (*keys, str(session.get("session_key") or "")) if include_current else keys
+    for key in dict.fromkeys(candidates):
         if key:
-            clear_turn_marker(home, key)
+            clear_turn_marker(home, key, expected_turn_id=expected_turn_id)
 
 
 def _auto_continue_note(prompt: str) -> str:
@@ -72,7 +82,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
-        clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
+        clear_turn_marker(
+            home,
+            session_key,
+            expected_turn_id=marker.get("turn_id"),
+            expected_started_at=(
+                None if marker.get("turn_id") else marker.get("started_at")
+            ),
+        )  # stale/disabled/crash-looping: a manual message continues
         return None
     if session.get("_auto_continue_scheduled"):
         return None
@@ -90,11 +107,26 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         if err:  # leave the marker: the next resume retries (bounded by attempts)
             session["_auto_continue_scheduled"] = False
             return
+        from agent.turn_authorization import TurnAuthorization
+
+        recovery_authorization = (
+            TurnAuthorization.blocked()
+            if marker.get("personal_authorization_blocked")
+            else TurnAuthorization.from_raw(None)
+        )
         with session["history_lock"]:
-            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
+            if (
+                session.get("running")
+                or session.get("_turn_interrupt_claim") is not None
+                or session.get("_finalized")
+            ):
                 session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
                 return
             session["running"] = True
+            auto_turn_id = _activate_turn_identity(session)
+            session["_turn_cancel_requested"] = False
+            session["_active_turn_route"] = "inline"
+            session["_active_turn_authorization"] = recovery_authorization
             session["last_active"] = time.time()
         # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have written the
         # marker and still be mid-turn. Leave the marker so a later resume retries.
@@ -103,7 +135,13 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         if _ensure_active_session_slot(sid, session) is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
             with session["history_lock"]:
-                session["running"] = False
+                if session.get("_active_turn_id") == auto_turn_id:
+                    session["running"] = False
+                    _clear_active_turn_state(
+                        session,
+                        recovery_authorization,
+                        expected_turn_id=auto_turn_id,
+                    )
                 session["_auto_continue_scheduled"] = False
             return
         with session["history_lock"]:
@@ -113,24 +151,20 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         try:
             _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
             _emit("message.start", sid)
-            from agent.turn_authorization import TurnAuthorization
-
-            recovery_authorization = (
-                TurnAuthorization.blocked()
-                if marker.get("personal_authorization_blocked")
-                else None
-            )
             submit_kwargs = {
                 "display_kind": "auto_continue",
-                **(
-                    {"turn_authorization": recovery_authorization}
-                    if recovery_authorization is not None else {}
-                ),
+                "turn_authorization": recovery_authorization,
+                "expected_turn_id": auto_turn_id,
             }
             _run_prompt_submit(rid, sid, session, text, **submit_kwargs)
         except Exception as exc:
-            _notif_log_failure("auto-continue dispatch failed", exc)
-            _notif_release_turn(session)  # rebound from session_notifications
+            try:
+                with contextlib.suppress(Exception):
+                    _notif_log_failure("auto-continue dispatch failed", exc)
+            finally:
+                _notif_release_turn(
+                    session, auto_turn_id
+                )  # rebound from session_notifications
     threading.Thread(target=kickoff, daemon=True).start()
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)", session_key, attempt, age)
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
@@ -154,12 +188,29 @@ def _same_as_active_turn_authorization(session: dict, authorization) -> bool:
 _ANY_ACTIVE_AUTHORIZATION = object()
 
 
-def _clear_active_turn_state(session: dict, expected=_ANY_ACTIVE_AUTHORIZATION) -> bool:
+def _activate_turn_identity(session: dict, turn_id: str | None = None) -> str:
+    """Mint the immutable identity for one admitted turn. Caller holds ``history_lock``."""
+    identity = str(turn_id or uuid.uuid4().hex)
+    session["_active_turn_id"] = identity
+    return identity
+
+
+def _clear_active_turn_state(
+    session: dict,
+    expected=_ANY_ACTIVE_AUTHORIZATION,
+    *,
+    expected_turn_id: str | None = None,
+) -> bool:
     """Clear the authorization + execution route owned by one admitted turn.
 
     Caller holds ``history_lock``.  An expected holder makes late cleanup unable
     to erase a newer turn that won admission in the meantime.
     """
+    if (
+        expected_turn_id is not None
+        and session.get("_active_turn_id") != expected_turn_id
+    ):
+        return False
     current = session.get("_active_turn_authorization")
     if expected is not _ANY_ACTIVE_AUTHORIZATION and current is not expected:
         # The expected turn may already have been revoked by interrupt/reset;
@@ -169,6 +220,7 @@ def _clear_active_turn_state(session: dict, expected=_ANY_ACTIVE_AUTHORIZATION) 
             return False
     session.pop("_active_turn_authorization", None)
     session.pop("_active_turn_route", None)
+    session.pop("_active_turn_id", None)
     return True
 
 
@@ -355,21 +407,41 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     """Interrupt a busy turn on a worker thread, never under ``history_lock`` (some providers can't apply ``interrupt()``
     until a blocking call returns; inline it stalled ``session.resume``). At most one interrupt worker per session so
     repeated steering can't leak threads."""
-    use_agent = agent is not None and hasattr(agent, "interrupt")
-    if not use_agent and not _session_active_turn_uses_compute_host(session):
-        return
     with session["history_lock"]:
         if session.get("_busy_interrupt_pending"):
             return
+        expected_turn_id = str(session.get("_active_turn_id") or "")
+        use_compute_host = session.get("_active_turn_route") == "compute"
+        use_agent = bool(
+            not use_compute_host
+            and expected_turn_id
+            and agent is not None
+            and callable(getattr(agent, "bind_gateway_turn", None))
+        )
+        if not use_agent and not use_compute_host:
+            return
         session["_busy_interrupt_pending"] = True
+        session["_busy_interrupt_pending_turn_id"] = expected_turn_id
 
     def interrupt() -> None:
         try:
+            with session["history_lock"]:
+                if session.get("_active_turn_id") != expected_turn_id:
+                    return
             with contextlib.suppress(Exception):
-                agent.interrupt() if use_agent else _get_compute_host_supervisor().interrupt(sid)
+                if use_agent:
+                    from agent.interrupt_compat import request_hard_interrupt
+
+                    request_hard_interrupt(agent, require_turn_id=expected_turn_id)
+                else:
+                    _get_compute_host_supervisor().interrupt(
+                        sid, expected_turn_id=expected_turn_id
+                    )
         finally:
             with session["history_lock"]:
-                session["_busy_interrupt_pending"] = False
+                if session.get("_busy_interrupt_pending_turn_id") == expected_turn_id:
+                    session["_busy_interrupt_pending"] = False
+                    session.pop("_busy_interrupt_pending_turn_id", None)
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
@@ -400,12 +472,23 @@ def _handle_busy_submit(
     mode = "queue" if queued else _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
-        if not session.get("running"):
-            return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
-        image_paths = list(session.get("attached_images", []))
-        if image_paths:
-            session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
-        active_authorization = session.get("_active_turn_authorization")
+        interrupt_claim = session.get("_turn_interrupt_claim")
+        interrupt_event = (
+            interrupt_claim.get("event") if isinstance(interrupt_claim, dict) else None
+        )
+        if interrupt_event is not None:
+            image_paths = []
+            active_authorization = None
+        else:
+            if not session.get("running"):
+                return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
+            image_paths = list(session.get("attached_images", []))
+            if image_paths:
+                session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
+            active_authorization = session.get("_active_turn_authorization")
+    if interrupt_event is not None:
+        interrupt_event.wait()
+        return None
     if (
         bool(getattr(active_authorization, "is_personal", False))
         or bool(getattr(turn_authorization, "is_personal", False))
@@ -428,14 +511,27 @@ def _handle_busy_submit(
     # Queue before asking the live turn to stop. Never call a provider/compute-host method under history_lock: an
     # interrupt can wait behind the op it cancels.
     with session["history_lock"]:
-        if not session.get("running"):
+        interrupt_claim = session.get("_turn_interrupt_claim")
+        interrupt_event = (
+            interrupt_claim.get("event") if isinstance(interrupt_claim, dict) else None
+        )
+        if interrupt_event is not None:
+            if image_paths:
+                session["attached_images"] = image_paths + list(
+                    session.get("attached_images", [])
+                )
+        elif not session.get("running"):
             if image_paths:
                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
             return None
-        _enqueue_prompt(
-            session, text, transport, image_paths=image_paths, turn_author=turn_author,
-            turn_authorization=turn_authorization)
-        session["last_active"] = time.time()
+        else:
+            _enqueue_prompt(
+                session, text, transport, image_paths=image_paths, turn_author=turn_author,
+                turn_authorization=turn_authorization)
+            session["last_active"] = time.time()
+    if interrupt_event is not None:
+        interrupt_event.wait()
+        return None
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
     # (earlier accepted steers); steer fall-throughs stay FIFO-queued.
@@ -458,10 +554,15 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     queued = None
     turn_authorization = None
     use_compute_host = False
+    claimed_turn_id = ""
     queue_generation = 0
     rejected_batch_has_more = False
     with session["history_lock"]:
-        if session.get("_closing") or session.get("running"):
+        if (
+            session.get("_closing")
+            or session.get("running")
+            or session.get("_turn_interrupt_claim") is not None
+        ):
             return False
         for _ in range(32):
             queued = session.get("queued_prompt")
@@ -489,6 +590,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 continue
             use_compute_host = compute_host_required
             session["running"] = True
+            _activate_turn_identity(session)
+            claimed_turn_id = str(session.get("_active_turn_id") or "")
+            session["_turn_cancel_requested"] = False
             session["_active_turn_route"] = "compute" if use_compute_host else "inline"
             session["_active_turn_authorization"] = turn_authorization
             queued_transport = queued.get("transport")
@@ -504,11 +608,15 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             break
         else:
             rejected_batch_has_more = bool(session.get("queued_prompt"))
-    for authorization, reason in rejected_admissions:
-        _emit_person_admission(sid, authorization, "terminal", reason=reason)
-    for message in rejected_messages:
-        _emit("error", sid, {"message": message})
     if queued is None:
+        for authorization, reason in rejected_admissions:
+            with contextlib.suppress(Exception):
+                _emit_person_admission(
+                    sid, authorization, "terminal", reason=reason
+                )
+        for message in rejected_messages:
+            with contextlib.suppress(Exception):
+                _emit("error", sid, {"message": message})
         if rejected_batch_has_more:
             threading.Thread(
                 target=_drain_queued_prompt,
@@ -541,7 +649,10 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         return True
     if generation_cancelled:
         return True
-    kwargs: dict = {"queued_prompt_generation": queue_generation}
+    kwargs: dict = {
+        "queued_prompt_generation": queue_generation,
+        "expected_turn_id": claimed_turn_id,
+    }
     if queued.get("image_paths"):
         kwargs["image_paths"] = queued["image_paths"]
     # The compute-host frame has no author field, so only the inline runner receives it.
@@ -549,9 +660,17 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     dispatch_failed = False
     restore_claim = False
     try:
+        restore_claim = not bool(
+            getattr(turn_authorization, "is_personal", False)
+        )
+        for authorization, reason in rejected_admissions:
+            _emit_person_admission(
+                sid, authorization, "terminal", reason=reason
+            )
+        for message in rejected_messages:
+            _emit("error", sid, {"message": message})
         if not use_compute_host:
-            if turn_authorization.is_personal:
-                kwargs["turn_authorization"] = turn_authorization
+            kwargs["turn_authorization"] = turn_authorization
             if _run_prompt_submit(
                 rid, sid, session, queued["text"], **kwargs, **author_kwargs
             ) is False:
@@ -562,21 +681,43 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 restore_claim = not bool(
                     getattr(turn_authorization, "is_personal", False)
                 )
-        elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
+
+        if use_compute_host and (
+            resp := _submit_prompt_to_compute_host(
+                rid, sid, session, queued["text"],
+                expected_turn_authorization=turn_authorization,
+                **kwargs,
+            )
+        ).get("error"):
+            cleaned_failed_turn = False
             with session["history_lock"]:
-                session["running"] = False
-                _clear_inflight_turn(session)
-                _clear_active_turn_state(session, turn_authorization)
-            _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
+                if (
+                    session.get("_active_turn_id") == claimed_turn_id
+                    and session.get("_active_turn_authorization")
+                    is turn_authorization
+                    and _clear_active_turn_state(
+                        session,
+                        turn_authorization,
+                        expected_turn_id=claimed_turn_id,
+                    )
+                ):
+                    session["running"] = False
+                    _clear_inflight_turn(session)
+                    cleaned_failed_turn = True
+            if cleaned_failed_turn:
+                _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True
     except Exception as exc:
-        _notif_log_failure("queued prompt dispatch failed", exc)
-        if bool(getattr(turn_authorization, "is_personal", False)):
-            _emit_person_admission(
-                sid, turn_authorization, "terminal", reason="dispatch_failed"
-            )
-        _notif_release_turn(session)
         dispatch_failed = True
+        with contextlib.suppress(Exception):
+            _notif_log_failure("queued prompt dispatch failed", exc)
+        if bool(getattr(turn_authorization, "is_personal", False)):
+            with contextlib.suppress(Exception):
+                _emit_person_admission(
+                    sid, turn_authorization, "terminal", reason="dispatch_failed"
+                )
+        with contextlib.suppress(Exception):
+            _notif_release_turn(session, claimed_turn_id)
     if dispatch_failed:
         with session["history_lock"]:
             if (restore_claim and not session.get("_closing") and not session.get("_turn_cancel_requested")
@@ -586,9 +727,16 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                     session,
                     [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])],
                 )
-            if session.get("_active_turn_authorization") is turn_authorization:
+            if (
+                session.get("_active_turn_id") == claimed_turn_id
+                and session.get("_active_turn_authorization") is turn_authorization
+            ):
                 session["running"] = False
-                _clear_active_turn_state(session, turn_authorization)
+                _clear_active_turn_state(
+                    session,
+                    turn_authorization,
+                    expected_turn_id=claimed_turn_id,
+                )
             drain_next = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
         if drain_next and not restore_claim:
             _drain_queued_prompt(rid, sid, session)
@@ -627,7 +775,14 @@ def _inflight_snapshot(session: dict) -> dict | None:
 
 
 def _emit_terminal_turn_error(
-    sid: str, session: dict, error: Any, error_surface: Optional[dict] = None, *, retire_marker: bool = True) -> None:
+    sid: str,
+    session: dict,
+    error: Any,
+    error_surface: Optional[dict] = None,
+    *,
+    retire_marker: bool = True,
+    expected_turn_id: str | None = None,
+) -> None:
     """Close a failed turn with the same ``status: "error"`` ``message.complete`` frame as the returned-error path,
     retaining the turn so a client that missed the frame recovers it from ``session.resume``'s ``inflight``.
     ``error_surface`` ({layer, code, retryable}) is classified from an exception if absent."""
@@ -638,6 +793,11 @@ def _emit_terminal_turn_error(
             error_surface = build_error_surface_from_exception(
                 error, provider=str(getattr(agent, "provider", "") or ""), model=str(getattr(agent, "model", "") or ""))
     with session["history_lock"]:
+        if (
+            expected_turn_id
+            and session.get("_active_turn_id") != expected_turn_id
+        ):
+            return
         _fail_inflight_turn(session, error, error_surface=error_surface)
         turn = session.get("inflight_turn") or {}
         message, partial = str(turn.get("error") or "turn failed"), str(turn.get("assistant") or "")
@@ -649,8 +809,14 @@ def _emit_terminal_turn_error(
     payload = {"text": text, "usage": _get_usage(agent) if agent is not None else {}, "status": "error",
                "error": message, "recoverable": True, **({"error_surface": error_surface} if error_surface else {}),
                **({"partial": True} if partial else {}), **({"rendered": rendered} if rendered else {})}
-    if retire_marker:
-        _retire_turn_marker(session)
+    if retire_marker and expected_turn_id:
+        _retire_turn_marker(session, expected_turn_id=expected_turn_id)
+    with session["history_lock"]:
+        if (
+            expected_turn_id
+            and session.get("_active_turn_id") != expected_turn_id
+        ):
+            return
     _emit("message.complete", sid, payload)
 
 

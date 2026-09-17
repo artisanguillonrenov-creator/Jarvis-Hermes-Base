@@ -514,21 +514,6 @@ method("session.compress", params=SessionCompressParams, result=SessionCompressR
 
 class SessionInterruptParams(SessionParams):
     expected_hosted_task_id: str | None = None  # only interrupt if this hosted task is the running one
-    fizko_person_access_token: str | None = Field(
-        default=None,
-        alias="_fizko_person_access_token",
-        description="Trusted per-person bearer matching the active personal turn.",
-    )
-    fizko_person_access_token_expires_at: float | None = Field(
-        default=None,
-        alias="_fizko_person_access_token_expires_at",
-        description="Unix expiry timestamp; required and must still be valid for a personal interrupt.",
-    )
-    fizko_person_principal_id: str | None = Field(
-        default=None,
-        alias="_fizko_person_principal_id",
-        description="Trusted stable opaque owner id matching the active personal turn.",
-    )
 
 
 class InterruptStatus(WireEnum):
@@ -544,7 +529,8 @@ class SessionInterruptResult(Result):
 
 method("session.interrupt", params=SessionInterruptParams, result=SessionInterruptResult,
        doc=("Stop the running turn (and streaming TTS); retires the crash-recovery marker. "
-            "A personal turn requires its matching, unexpired per-turn bearer and expiry metadata."))
+            "Direct interruption is unavailable while a person-authorized turn is active; "
+            "send an authenticated prompt.submit correction through the trusted admission rail."))
 
 
 class CorrectionStatus(WireEnum):

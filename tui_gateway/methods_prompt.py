@@ -445,7 +445,9 @@ def _storage_error_data(failure, raw) -> dict:
     return {"code": failure.code, "cause": failure.cause, "details": storage_failure_details(raw)}
 
 
-def _persist_session_row_for_submit(rid, session):
+def _persist_session_row_for_submit(
+    rid, session, *, expected_turn_id: str, expected_authorization
+):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here); the error reply is the only user-visible signal (desktop maps it to a toast)."""
     from hermes_state_user_copy import describe_storage_failure
@@ -478,21 +480,30 @@ def _persist_session_row_for_submit(rid, session):
     # No turn thread will start, so neither resume nor the busy queue may see
     # this rejected prompt as live. Release the slot a turn would normally own.
     with session["history_lock"]:
-        session["running"] = False
-        session["last_active"] = time.time()
-        session.pop("_hosted_room_task", None)
-        _clear_active_turn_state(session)
-        _clear_inflight_turn(session)
-        _release_active_session_slot(session)
+        if (
+            session.get("_active_turn_id") == expected_turn_id
+            and session.get("_active_turn_authorization") is expected_authorization
+        ):
+            session["running"] = False
+            session["last_active"] = time.time()
+            session.pop("_hosted_room_task", None)
+            _clear_active_turn_state(
+                session,
+                expected_authorization,
+                expected_turn_id=expected_turn_id,
+            )
+            _clear_inflight_turn(session)
+            _release_active_session_slot(session)
     return error
 
 
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, hosted_terminal_callback,
-    turn_author=None, turn_authorization=None,
+    turn_author=None, turn_authorization=None, expected_turn_id: str | None = None,
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
+
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
@@ -515,7 +526,9 @@ def _run_after_agent_ready(
         # the only way resume shows this to a disconnected client.
         _emit_terminal_turn_error(
             sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
-            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True},
+            expected_turn_id=expected_turn_id,
+        )
         with session["history_lock"]:
             if _clear_active_turn_state(session, turn_authorization):
                 session["running"] = False
@@ -525,19 +538,34 @@ def _run_after_agent_ready(
     terminal_reason = None
     terminal_message = None
     with session["history_lock"]:
-        if session.get("_turn_cancel_requested") or not session.get("running"):
-            terminal_reason = (
-                "cancelled_before_ready"
-                if session.get("_turn_cancel_requested")
-                else "session_stopped_before_ready"
+        stale_turn = bool(
+            expected_turn_id
+            and (
+                session.get("_active_turn_id") != expected_turn_id
+                or session.get("_active_turn_authorization") is not turn_authorization
             )
-            if _clear_active_turn_state(session, turn_authorization):
+        )
+        if stale_turn or session.get("_turn_cancel_requested") or not session.get("running"):
+            terminal_reason = (
+                "superseded_before_ready"
+                if stale_turn
+                else (
+                    "cancelled_before_ready"
+                    if session.get("_turn_cancel_requested")
+                    else "session_stopped_before_ready"
+                )
+            )
+            if not stale_turn and _clear_active_turn_state(session, turn_authorization):
                 session["running"] = False
                 _clear_inflight_turn(session)
             terminal_message = (
-                "Turn cancelled before the agent was ready"
-                if session.get("_turn_cancel_requested")
-                else "Session no longer running before the agent was ready"
+                "Turn superseded before the agent was ready"
+                if stale_turn
+                else (
+                    "Turn cancelled before the agent was ready"
+                    if session.get("_turn_cancel_requested")
+                    else "Session no longer running before the agent was ready"
+                )
             )
     if terminal_reason is not None:
         _emit_person_admission(
@@ -550,7 +578,7 @@ def _run_after_agent_ready(
         started = _run_prompt_submit(
             rid, sid, session, text, display_kind=display_kind,
             terminal_callback=hosted_terminal_callback, turn_author=turn_author,
-            turn_authorization=turn_authorization)
+            turn_authorization=turn_authorization, expected_turn_id=expected_turn_id)
     except BaseException:
         with session["history_lock"]:
             if _clear_active_turn_state(session, turn_authorization):
@@ -573,6 +601,7 @@ _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
 
 _SUBMIT_TURN_BECAME_BUSY = object()
+_SUBMIT_TURN_INTERRUPT_PENDING = object()
 
 
 def _lock_in_submit_turn(
@@ -583,6 +612,11 @@ def _lock_in_submit_turn(
     cut, mark the turn running + in flight.  Returns ``(err, survivor_fields)``."""
     fields = {}
     with session["history_lock"]:
+        interrupt_claim = session.get("_turn_interrupt_claim")
+        if isinstance(interrupt_claim, dict):
+            return _SUBMIT_TURN_INTERRUPT_PENDING, {
+                "interrupt_claim_event": interrupt_claim.get("event")
+            }
         # The optimistic idle check in prompt.submit intentionally releases this
         # lock before reaching here. A queue drain may claim the turn meanwhile;
         # send the caller back through the authenticated busy-input path rather
@@ -604,6 +638,8 @@ def _lock_in_submit_turn(
             if err is not None:
                 return err, {}
         session["running"] = True
+        _activate_turn_identity(session)
+        fields["_admitted_turn_id"] = str(session.get("_active_turn_id") or "")
         session["_turn_cancel_requested"] = False
         session["_active_turn_route"] = "compute" if turn_isolation else "inline"
         session["_active_turn_authorization"] = turn_authorization
@@ -801,6 +837,11 @@ def _(rid, params: dict) -> dict:
         err, survivor_fields = _lock_in_submit_turn(
             rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task,
             display_kind, turn_authorization, turn_isolation)
+        if err is _SUBMIT_TURN_INTERRUPT_PENDING:
+            interrupt_event = survivor_fields.get("interrupt_claim_event")
+            if interrupt_event is None or not interrupt_event.wait(timeout=5.0):
+                return _err(rid, 4092, "session interrupt is still settling; retry")
+            continue
         if err is not _SUBMIT_TURN_BECAME_BUSY:
             break
         # A queued turn claimed the idle slot between the optimistic check and
@@ -816,12 +857,16 @@ def _(rid, params: dict) -> dict:
             return busy_response
     if err is not None:
         return err
+    admitted_turn_id = str(survivor_fields.pop("_admitted_turn_id", "") or "")
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
-            rid, sid, session, text, display_kind=display_kind)
+            rid, sid, session, text, display_kind=display_kind,
+            expected_turn_id=admitted_turn_id,
+            expected_turn_authorization=turn_authorization,
+        )
         if not isolated_response.get("error"):
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
@@ -840,8 +885,16 @@ def _(rid, params: dict) -> dict:
         with session["history_lock"]:
             if session.get("_active_turn_authorization") is turn_authorization:
                 session["_active_turn_route"] = "inline"
-    if (err := _persist_session_row_for_submit(rid, session)) is not None:
+    if (
+        err := _persist_session_row_for_submit(
+            rid,
+            session,
+            expected_turn_id=admitted_turn_id,
+            expected_authorization=turn_authorization,
+        )
+    ) is not None:
         return err
+    run_thread = None
     try:
         # A completed FAILED build must not wedge the session: rebuild, don't replay it.
         if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
@@ -849,17 +902,34 @@ def _(rid, params: dict) -> dict:
         run_thread = threading.Thread(
             target=lambda: _run_after_agent_ready(
                 rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author,
-                turn_authorization),
+                turn_authorization, admitted_turn_id),
             daemon=True)
         # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
-        session["_run_thread"] = run_thread
+        with session["history_lock"]:
+            if (
+                not session.get("running")
+                or session.get("_turn_cancel_requested")
+                or session.get("_active_turn_id") != admitted_turn_id
+                or session.get("_active_turn_authorization") is not turn_authorization
+            ):
+                _emit_person_admission(
+                    sid,
+                    turn_authorization,
+                    "terminal",
+                    reason="cancelled_before_dispatch",
+                )
+                return _ok(rid, {"status": "streaming", **survivor_fields})
+            session["_run_thread"] = run_thread
+            session["_run_thread_turn_id"] = admitted_turn_id
         run_thread.start()
     except BaseException:
         with session["history_lock"]:
             if _clear_active_turn_state(session, turn_authorization):
                 session["running"] = False
                 _clear_inflight_turn(session)
-            session.pop("_run_thread", None)
+            if session.get("_run_thread") is run_thread:
+                session.pop("_run_thread", None)
+                session.pop("_run_thread_turn_id", None)
         raise
     return _ok(rid, {"status": "streaming", **survivor_fields})
 
