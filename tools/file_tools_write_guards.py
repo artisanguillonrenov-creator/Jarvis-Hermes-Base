@@ -164,7 +164,11 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     nt_err = get_nt_namespace_error(filepath, verb="Write")
     if nt_err:
         return nt_err
-    candidates = (_resolved_or_raw(filepath, task_id), os.path.normpath(_expand_tilde(filepath)))
+    try:
+        resolved = str(_resolve_path_for_task(filepath, task_id))
+    except (OSError, ValueError):
+        resolved = None
+    candidates = (resolved or filepath, os.path.normpath(_expand_tilde(filepath)))
     if any(c.startswith(_SENSITIVE_PATH_PREFIXES) or c in _SENSITIVE_EXACT_PATHS for c in candidates):
         return (
             f"Refusing to write to sensitive system path: {filepath}\n"
@@ -172,10 +176,9 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     # approvals.mode and other security settings live in config.yaml; a
     # prompt-injected agent could silently disable exec approval by editing it.
     hermes_config = _get_hermes_config_resolved()
-    resolved_candidate = candidates[0]
     if hermes_config and (
             hermes_config in candidates
-            or _is_hermes_profile_config(resolved_candidate, hermes_config)):
+            or (resolved is not None and _is_hermes_profile_config(resolved, hermes_config))):
         return (
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
