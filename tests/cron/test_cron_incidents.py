@@ -222,19 +222,55 @@ def test_missing_db_no_crash(monkeypatch, tmp_path):
 # ── Scheduler gating ───────────────────────────────────────────────────────
 
 
-def test_unacked_failure_still_alerts(monkeypatch, tmp_path):
+def test_undelivered_failure_retries_until_an_operator_can_receive_it(monkeypatch, tmp_path):
     inc = _point_db(monkeypatch, tmp_path)
-    deliveries = []
     job = _job()
     with cron_jobs.use_cron_store(tmp_path):
         cron_jobs.save_jobs([job])
-        _tick_failing(job, tmp_path, deliveries, error="unacked boom")
-        _tick_failing(job, tmp_path, deliveries, error="unacked boom")
+        first, _, _, first_suppressed, first_id = sched._compose_run_delivery(
+            job, success=False, error="unacked boom", final_response="", output_file=None
+        )
+        second, _, _, second_suppressed, second_id = sched._compose_run_delivery(
+            job, success=False, error="unacked boom", final_response="", output_file=None
+        )
 
-    assert len(deliveries) == 2, "unacked failures must keep alerting per run"
-    rows = inc.list_incidents()
-    assert len(rows) == 1
-    assert rows[0]["state"] == "detected"
+    assert first and second, "a failed delivery must leave the incident retryable"
+    assert first_suppressed is False and second_suppressed is False
+    assert first_id == second_id
+    assert inc.get_incident(first_id)["state"] == "detected"
+
+
+def test_alerted_signature_is_suppressed_until_the_error_changes(monkeypatch, tmp_path):
+    """One delivered alert is enough for a continuing identical failure.
+
+    An ``alerted`` incident represents a notice that reached the configured
+    delivery lane; only a changed failure signature creates a new incident and
+    warrants another operator ping.
+    """
+    inc = _point_db(monkeypatch, tmp_path)
+    job = _job()
+    with cron_jobs.use_cron_store(tmp_path):
+        cron_jobs.save_jobs([job])
+        first, _, _, first_suppressed, first_id = sched._compose_run_delivery(
+            job, success=False, error="boom signature A", final_response="", output_file=None
+        )
+        sched._mark_incident_alerted(first_id)
+        repeated, _, _, repeated_suppressed, repeated_id = sched._compose_run_delivery(
+            job, success=False, error="boom signature A", final_response="", output_file=None
+        )
+
+        assert first and first_suppressed is False
+        assert repeated == "" and repeated_suppressed is True
+        assert repeated_id == first_id
+        assert inc.list_incidents()[0]["state"] == "alerted"
+
+        changed, _, _, changed_suppressed, changed_id = sched._compose_run_delivery(
+            job, success=False, error="boom signature B", final_response="", output_file=None
+        )
+
+    assert changed and changed_suppressed is False
+    assert changed_id != first_id
+    assert inc.count_incidents() == 2
 
 
 def test_ack_suppresses_alert_until_signature_changes(monkeypatch, tmp_path):

@@ -289,16 +289,18 @@ def _upsert_incident_for_failure(
     job: dict, error: str, *, output_file: Optional[Any] = None
 ) -> tuple[bool, Optional[str]]:
     """Record a durable failure incident (grouped by job + error signature). Returns
-    ``(acked, incident_id)``; acked=True when the signature's incident is already ``closed`` ->
-    suppress the per-run ping. Store errors log at debug; the caller delivers as if none existed."""
+    ``(suppressed, incident_id)``; suppressed=True when the signature's incident is already
+    ``alerted`` or ``closed`` -> suppress the per-run ping. An incident moves to ``alerted`` only
+    after a delivery reaches its configured lane, so delivery failures remain retryable. Store
+    errors log at debug; the caller delivers as if none existed."""
     try:
         from cron.incidents import get_incident, upsert_incident
 
         incident_id, _is_new = upsert_incident(
             job["id"], str(error or ""), job_name=job.get("name"), output_file=output_file)
         incident = get_incident(incident_id)
-        acked = bool(incident and incident.get("state") == "closed")
-        return acked, incident_id
+        suppressed = bool(incident and incident.get("state") in ("alerted", "closed"))
+        return suppressed, incident_id
     except Exception as exc:
         logger.debug(
             "Incident store unavailable for job %s (delivery unaffected): %s",
@@ -2806,8 +2808,9 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         incident_acked=d.incident_acked,
         success=d.success,
     )
-    if delivery_outcome in ("delivered", "not_configured") and not d.success:
-        # Failure ping left the process (or had a configured target): mark the incident alerted.
+    if delivery_outcome == "delivered" and not d.success:
+        # Only an actual delivery marks this signature alerted. A missing target must remain
+        # detected so the next run retries once an operator route is configured.
         _mark_incident_alerted(d.failure_incident_id)
     finish_execution(
         execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
@@ -2846,7 +2849,7 @@ def _deliver_crash_failure(
         delivery_error=delivery_error, should_deliver=True, unresolved_origin=unresolved_origin,
         normalized_deliver=normalized_deliver, incident_acked=False, success=False,
         delivery_queued=job.get("last_delivery_queued"))
-    if delivery_outcome in ("delivered", "not_configured"):
+    if delivery_outcome == "delivered":
         _mark_incident_alerted(failure_incident_id)
     return delivery_error, delivery_outcome
 
