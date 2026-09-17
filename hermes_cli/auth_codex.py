@@ -655,6 +655,13 @@ def _codex_pool_dicts(entries: Optional[List[Any]]) -> Iterator[Dict[str, Any]]:
             yield entry
 
 
+def _read_codex_pool_entries() -> Optional[List[Any]]:
+    """Read ``credential_pool.openai-codex`` from the active auth store (None when absent)."""
+    from hermes_cli.auth import read_credential_pool
+    entries = read_credential_pool("openai-codex")
+    return entries if entries else None
+
+
 def _codex_pool_rate_limit_status() -> Optional[Dict[str, Any]]:
     """Return metadata for a pool-only Codex credential in quota cooldown."""
     from hermes_cli.auth import _nonempty_str, read_credential_pool

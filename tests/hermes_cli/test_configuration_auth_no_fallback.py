@@ -224,7 +224,6 @@ def test_quarantined_oauth_states_keep_fallback_semantics(monkeypatch):
         "_load_auth_store_maybe_locked",
         lambda _lock=True: xai_store,
     )
-    monkeypatch.setattr(auth_mod, "_load_global_auth_store", lambda: {})
     with pytest.raises(AuthError) as xai_exc:
         auth_xai._read_xai_oauth_tokens()
     assert getattr(xai_exc.value, "category", None) is None
@@ -260,7 +259,6 @@ def test_producer_level_missing_credential_categories(tmp_path, monkeypatch):
     from hermes_cli.auth_nous import _NousRuntimeResolve
 
     monkeypatch.setattr(auth_xai, "_load_auth_store_maybe_locked", lambda _lock=True: {})
-    monkeypatch.setattr(auth_mod, "_load_global_auth_store", lambda: {})
     with pytest.raises(AuthError) as xai_exc:
         auth_xai._read_xai_oauth_tokens()
     assert getattr(xai_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
@@ -295,7 +293,7 @@ def test_producer_level_missing_credential_categories(tmp_path, monkeypatch):
     assert getattr(vertex_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
 
     monkeypatch.setattr("hermes_cli.config.get_env_value", lambda _name: "")
-    monkeypatch.setattr(runtime_provider, "_getenv", lambda *_args: "")
+    monkeypatch.setattr("hermes_cli.runtime_provider_backends.get_secret_str", lambda *_a, **_k: "")
     with pytest.raises(AuthError) as azure_exc:
         runtime_provider._resolve_azure_foundry_runtime(
             requested_provider="azure-foundry",
@@ -336,7 +334,10 @@ def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
     with pytest.raises(AuthError):
         runtime_provider._resolve_rung("anthropic", lambda: (_ for _ in ()).throw(missing))
 
-    monkeypatch.setattr("agent.anthropic_credentials.resolve_anthropic_token", lambda: "")
+    monkeypatch.setattr(
+        "agent.anthropic_credentials.resolve_anthropic_token",
+        lambda *a, **k: "",
+    )
     assert runtime_provider._resolve_rung(
         "auto",
         lambda: runtime_provider._anthropic_env_runtime("auto", {}),
@@ -372,7 +373,10 @@ def test_auto_runtime_ladder_continues_after_provider_missing(provider, monkeypa
         "_openrouter_fallback",
         lambda *_args: {"provider": "openrouter", "api_key": "fallback-key"},
     )
-    monkeypatch.setattr("agent.anthropic_credentials.resolve_anthropic_token", lambda: "")
+    monkeypatch.setattr(
+        "agent.anthropic_credentials.resolve_anthropic_token",
+        lambda *a, **k: "",
+    )
     monkeypatch.setattr(
         auth_mod,
         "resolve_minimax_oauth_runtime_credentials",
@@ -419,7 +423,7 @@ def test_azure_explicit_shortcut_preserves_preexisting_empty_key_behavior(monkey
     """Keep the Azure Anthropic shortcut behavior unchanged; this PR only classifies producers."""
     from hermes_cli import runtime_provider
 
-    monkeypatch.setattr(runtime_provider, "_getenv", lambda *_args: "")
+    monkeypatch.setattr(runtime_provider, "get_secret_str", lambda *_a, **_k: "")
     runtime = runtime_provider._resolve_requested_shortcuts(
         "anthropic",
         None,
