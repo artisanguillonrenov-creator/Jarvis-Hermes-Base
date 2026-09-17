@@ -14,13 +14,14 @@ from agent.turn_authorization import (
 from tui_gateway import server as srv
 
 
-def _authorization(raw, *, expires_at=None, principal_id="a" * 64):
+def _authorization(raw, *, expires_at=None, principal_id="a" * 64, admission_id="1" * 32):
     if raw is None:
         return TurnAuthorization.from_raw(None)
     return TurnAuthorization.from_raw(
         raw,
         expires_at=time.time() + 3600 if expires_at is None else expires_at,
         principal_id=principal_id,
+        admission_id=admission_id,
     )
 
 
@@ -85,6 +86,22 @@ def test_prompt_submit_rejects_person_token_without_expiry():
     assert "expiry is required" in response["error"]["message"]
 
 
+def test_prompt_submit_requires_private_admission_id():
+    response = srv._methods["prompt.submit"](
+        "r",
+        {
+            "session_id": "missing",
+            "text": "hello",
+            "_fizko_person_access_token": "person-token",
+            "_fizko_person_access_token_expires_at": time.time() + 3600,
+            "_fizko_person_principal_id": "a" * 64,
+        },
+    )
+
+    assert response["error"]["code"] == 4004
+    assert "admission id is required" in response["error"]["message"]
+
+
 def test_prompt_submit_rejects_expired_person_token():
     response = srv._methods["prompt.submit"](
         "r",
@@ -94,6 +111,7 @@ def test_prompt_submit_rejects_expired_person_token():
             "_fizko_person_access_token": "person-token",
             "_fizko_person_access_token_expires_at": time.time() - 1,
             "_fizko_person_principal_id": "a" * 64,
+            "_fizko_person_admission_id": "0" * 32,
         },
     )
 
@@ -114,6 +132,7 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
                 "_fizko_person_access_token": "person-token",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
                 "_fizko_person_principal_id": "a" * 64,
+                "_fizko_person_admission_id": "1" * 32,
             },
         )
     finally:
@@ -141,7 +160,8 @@ def test_queued_person_authorized_turn_does_not_bypass_compute_isolation(monkeyp
     assert session["running"] is False
     assert session.get("queued_prompt") is None
     assert "_active_turn_authorization" not in session
-    assert events and events[0][0] == "error"
+    assert any(event[0] == "error" for event in events)
+    assert any(event[0] == "person.admission" for event in events)
 
 
 def test_expired_queued_person_authorization_is_dropped_fail_closed(monkeypatch):
@@ -166,12 +186,16 @@ def test_expired_queued_person_authorization_is_dropped_fail_closed(monkeypatch)
     assert session["running"] is False
     assert session.get("queued_prompt") is None
     assert "_active_turn_authorization" not in session
-    assert events and events[0][0] == "error"
-    assert "expired" in events[0][2]["message"]
+    errors = [event for event in events if event[0] == "error"]
+    assert errors and "expired" in errors[0][2]["message"]
+    assert any(event[0] == "person.admission" for event in events)
 
 
 def test_expired_queued_head_does_not_block_later_static_prompt(monkeypatch):
-    expired = _authorization("expired-person", expires_at=time.time() - 1)
+    admission_id = "e" * 32
+    expired = _authorization(
+        "expired-person", expires_at=time.time() - 1, admission_id=admission_id
+    )
     session = _session(types.SimpleNamespace())
     session["queued_prompt"] = {
         "text": "expired work", "transport": None, "turn_authorization": expired,
@@ -191,7 +215,16 @@ def test_expired_queued_head_does_not_block_later_static_prompt(monkeypatch):
 
     assert [text for text, _kwargs in dispatched] == ["ordinary work"]
     assert "turn_authorization" not in dispatched[0][1]
-    assert any("expired" in args[2]["message"] for args in events)
+    assert any(
+        "expired" in args[2]["message"]
+        for args in events
+        if args[0] == "error"
+    )
+    assert (
+        "person.admission",
+        "sid",
+        {"admission_id": admission_id, "status": "terminal", "reason": "expired"},
+    ) in events
 
 
 def test_rejected_queue_batch_schedules_bounded_continuation(monkeypatch):
@@ -267,6 +300,7 @@ def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monk
         "_fizko_person_access_token": secret,
         "_fizko_person_access_token_expires_at": time.time() + 3600,
         "_fizko_person_principal_id": "a" * 64,
+        "_fizko_person_admission_id": "2" * 32,
     }
     monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
     monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
@@ -293,6 +327,15 @@ def test_prompt_submit_pops_token_scopes_it_to_run_and_resets_without_leaks(monk
     assert secret not in json.dumps(session, default=repr)
     assert secret not in json.dumps(events, default=repr)
     assert current_fizko_authorization_header() == ""
+    admission_events = [event for event in events if event[0] == "person.admission"]
+    assert admission_events == [
+        ("person.admission", "sid", {"admission_id": "2" * 32, "status": "started"}),
+        (
+            "person.admission",
+            "sid",
+            {"admission_id": "2" * 32, "status": "terminal", "reason": "finished"},
+        ),
+    ]
 
 
 def test_different_person_cannot_redirect_or_interrupt_the_active_turn(monkeypatch):
@@ -319,6 +362,7 @@ def test_different_person_cannot_redirect_or_interrupt_the_active_turn(monkeypat
                 "_fizko_person_access_token": "incoming-person",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
                 "_fizko_person_principal_id": "b" * 64,
+                "_fizko_person_admission_id": "3" * 32,
             },
         )
     finally:
@@ -435,6 +479,7 @@ def test_queued_prompts_keep_distinct_person_authorizations(monkeypatch):
                     "_fizko_person_access_token": person,
                     "_fizko_person_access_token_expires_at": time.time() + 3600,
                     "_fizko_person_principal_id": ("b" if person == "person-b" else "c") * 64,
+                    "_fizko_person_admission_id": ("4" if person == "person-b" else "5") * 32,
                 },
             )
             assert response["result"] == {"status": "queued"}
@@ -473,6 +518,7 @@ def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
                 "_fizko_person_access_token": "person-b",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
                 "_fizko_person_principal_id": "b" * 64,
+                "_fizko_person_admission_id": "6" * 32,
             },
         )
     finally:
@@ -480,6 +526,27 @@ def test_same_text_from_different_person_is_not_deduplicated(monkeypatch):
 
     assert response["result"] == {"status": "queued"}
     assert session["queued_prompt"]["text"] == "same words"
+
+
+def test_personal_same_principal_prompts_are_never_merged_or_deduplicated():
+    active = _authorization("person-a", admission_id="a" * 32)
+    first = _authorization("person-b", admission_id="b" * 32)
+    second = _authorization("person-c", admission_id="c" * 32)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        running=True,
+        _active_turn_authorization=active,
+        inflight_turn={"user": "same words", "assistant": "", "streaming": True, "error": ""},
+    )
+
+    srv._enqueue_prompt(session, "same words", None, turn_authorization=first)
+    srv._enqueue_prompt(session, "same words", None, turn_authorization=second)
+
+    assert session["queued_prompt"]["text"] == "same words"
+    assert session["queued_prompt"]["turn_authorization"] is first
+    assert session["queued_prompts"] == [
+        {"text": "same words", "transport": None, "turn_authorization": second}
+    ]
 
 
 def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
@@ -562,6 +629,7 @@ def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypat
                     "_fizko_person_access_token": "queued-person",
                     "_fizko_person_access_token_expires_at": time.time() + 3600,
                     "_fizko_person_principal_id": "a" * 64,
+                    "_fizko_person_admission_id": "7" * 32,
                 },
             ),
             name="concurrent-submit",
@@ -585,7 +653,7 @@ def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypat
     assert authorization.same_credential(queued)
 
 
-def test_failed_queued_inline_dispatch_restores_prompt_and_clears_authorization(monkeypatch):
+def test_failed_queued_personal_dispatch_drops_retired_admission(monkeypatch):
     holder = _authorization("queued-person")
     queued = {"text": "try later", "transport": None, "turn_authorization": holder}
     session = _session(types.SimpleNamespace())
@@ -596,7 +664,7 @@ def test_failed_queued_inline_dispatch_restores_prompt_and_clears_authorization(
     assert srv._drain_queued_prompt("drain", "sid", session) is True
 
     assert session["running"] is False
-    assert session["queued_prompt"] is queued
+    assert session.get("queued_prompt") is None
     assert "_active_turn_authorization" not in session
     assert "_active_turn_route" not in session
 
@@ -605,8 +673,9 @@ def test_failed_run_prompt_admission_clears_authorization_and_route(monkeypatch)
     holder = _authorization("refused-person")
     session = _session(types.SimpleNamespace())
     session.update(running=True, _active_turn_authorization=holder, _active_turn_route="inline")
+    events = []
     monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: RuntimeError("owned elsewhere"))
-    monkeypatch.setattr(srv, "_emit", lambda *_args: None)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
 
     assert srv._run_prompt_submit(
         "r", "sid", session, "hello", turn_authorization=holder
@@ -615,6 +684,17 @@ def test_failed_run_prompt_admission_clears_authorization_and_route(monkeypatch)
     assert session["running"] is False
     assert "_active_turn_authorization" not in session
     assert "_active_turn_route" not in session
+    assert events[-1:] == [
+        (
+            "person.admission",
+            "sid",
+            {
+                "admission_id": "1" * 32,
+                "status": "terminal",
+                "reason": "admission_rejected",
+            },
+        )
+    ]
 
 
 def test_interrupt_clears_active_authorization_and_uses_forced_inline_route(monkeypatch):
@@ -802,6 +882,7 @@ def test_reconnected_person_queues_rotated_bearer_behind_owned_active_turn(monke
             "_fizko_person_access_token": "person-token-t2",
             "_fizko_person_access_token_expires_at": time.time() + 3600,
             "_fizko_person_principal_id": "a" * 64,
+            "_fizko_person_admission_id": "8" * 32,
         }
         response = srv._methods["prompt.submit"]("r", params)
     finally:

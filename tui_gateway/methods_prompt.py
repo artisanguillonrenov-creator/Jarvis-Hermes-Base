@@ -583,6 +583,7 @@ def _(rid, params: dict) -> dict:
     from agent.turn_authorization import (
         FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM,
         FIZKO_PERSON_ACCESS_TOKEN_PARAM,
+        FIZKO_PERSON_ADMISSION_ID_PARAM,
         FIZKO_PERSON_PRINCIPAL_ID_PARAM,
         TurnAuthorization,
     )
@@ -592,11 +593,14 @@ def _(rid, params: dict) -> dict:
         FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM, None
     )
     raw_person_principal_id = params.pop(FIZKO_PERSON_PRINCIPAL_ID_PARAM, None)
+    raw_person_admission_id = params.pop(FIZKO_PERSON_ADMISSION_ID_PARAM, None)
     try:
         turn_authorization = TurnAuthorization.from_raw(
             raw_person_token,
             expires_at=raw_person_token_expires_at,
             principal_id=raw_person_principal_id,
+            admission_id=raw_person_admission_id,
+            require_admission=True,
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))

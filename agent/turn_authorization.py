@@ -19,15 +19,23 @@ from typing import Any
 FIZKO_PERSON_ACCESS_TOKEN_PARAM = "_fizko_person_access_token"
 FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM = "_fizko_person_access_token_expires_at"
 FIZKO_PERSON_PRINCIPAL_ID_PARAM = "_fizko_person_principal_id"
+FIZKO_PERSON_ADMISSION_ID_PARAM = "_fizko_person_admission_id"
 
 _BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,16384}\Z")
 _PRINCIPAL_ID = re.compile(r"[a-f0-9]{64}\Z")
+_ADMISSION_ID = re.compile(r"[a-f0-9]{32}\Z")
 
 
 class TurnAuthorization:
     """Opaque tri-state authorization: static, personal bearer, or blocked personal descendant."""
 
-    __slots__ = ("__expires_at", "__personal", "__principal_id", "__token")
+    __slots__ = (
+        "__admission_id",
+        "__expires_at",
+        "__personal",
+        "__principal_id",
+        "__token",
+    )
 
     def __init__(
         self,
@@ -36,18 +44,26 @@ class TurnAuthorization:
         *,
         personal: bool = False,
         principal_id: str | None = None,
+        admission_id: str | None = None,
     ) -> None:
         self.__token = token
         self.__expires_at = expires_at
         self.__personal = personal
         self.__principal_id = principal_id
+        self.__admission_id = admission_id
 
     @classmethod
     def from_raw(
-        cls, raw: Any, *, expires_at: Any = None, principal_id: Any = None
+        cls,
+        raw: Any,
+        *,
+        expires_at: Any = None,
+        principal_id: Any = None,
+        admission_id: Any = None,
+        require_admission: bool = False,
     ) -> "TurnAuthorization":
         if raw is None:
-            if expires_at is not None or principal_id is not None:
+            if expires_at is not None or principal_id is not None or admission_id is not None:
                 raise ValueError("person token metadata requires a bearer token")
             return cls(None)
         if not isinstance(raw, str) or not _BEARER_TOKEN.fullmatch(raw):
@@ -58,6 +74,12 @@ class TurnAuthorization:
             raise ValueError("person principal id is required")
         if not isinstance(principal_id, str) or not _PRINCIPAL_ID.fullmatch(principal_id):
             raise ValueError("_fizko_person_principal_id must be a SHA-256 identifier")
+        if require_admission and admission_id is None:
+            raise ValueError("person admission id is required")
+        if admission_id is not None and (
+            not isinstance(admission_id, str) or not _ADMISSION_ID.fullmatch(admission_id)
+        ):
+            raise ValueError("_fizko_person_admission_id must be a private opaque identifier")
         if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
             raise ValueError("_fizko_person_access_token_expires_at must be a Unix timestamp")
         try:
@@ -68,7 +90,13 @@ class TurnAuthorization:
             ) from None
         if not math.isfinite(expiry) or expiry <= 0:
             raise ValueError("_fizko_person_access_token_expires_at must be a Unix timestamp")
-        return cls(raw, expiry, personal=True, principal_id=principal_id)
+        return cls(
+            raw,
+            expiry,
+            personal=True,
+            principal_id=principal_id,
+            admission_id=admission_id,
+        )
 
     @classmethod
     def blocked(cls) -> "TurnAuthorization":
@@ -113,6 +141,10 @@ class TurnAuthorization:
         if self.__principal_id is None or other.__principal_id is None:
             return self.__principal_id is other.__principal_id
         return hmac.compare_digest(self.__principal_id, other.__principal_id)
+
+    def _fizko_admission_id(self) -> str:
+        """Private accounting correlation; never an authenticator."""
+        return self.__admission_id or ""
 
     def _fizko_authorization_header(self) -> str:
         return f"Bearer {self.__token}" if self.__token is not None and not self.is_expired else ""

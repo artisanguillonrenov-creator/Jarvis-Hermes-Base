@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from typing import Any
 
 from .method_ctx import bind_module
 
@@ -171,6 +172,20 @@ def _clear_active_turn_state(session: dict, expected=_ANY_ACTIVE_AUTHORIZATION) 
     return True
 
 
+def _emit_person_admission(
+    sid: str, authorization: Any, status: str, *, reason: str | None = None
+) -> bool:
+    """Emit one private exact-ID lifecycle event when the holder is personal."""
+    admission_id = authorization._fizko_admission_id()
+    if not admission_id:
+        return False
+    payload = {"admission_id": admission_id, "status": status}
+    if reason is not None:
+        payload["reason"] = reason
+    _emit("person.admission", sid, payload)
+    return True
+
+
 def _enqueue_prompt(
     session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
     turn_author: dict | None = None, turn_authorization=None,
@@ -185,13 +200,14 @@ def _enqueue_prompt(
     # Missing authorization is an explicit no-token identity for queue isolation:
     # an internal follow-up must never merge into a personal caller's envelope.
     authorization = turn_authorization or TurnAuthorization.from_raw(None)
-    # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}" and re-fire the
-    # original after a correction settles.
-    # See #84417.
-    _drop_queued_duplicates_of_inflight_user(session)
+    # Scrub live-turn self-duplicates only for ordinary prompts. Every personal
+    # admission is a distinct accounting unit, even for identical text/owner.
+    if not authorization.is_personal:
+        _drop_queued_duplicates_of_inflight_user(session)
     text_only = not image_paths and isinstance(text, str)
     # A text-only self-copy of the live prompt would restart it on drain; an authored copy is another sender's message.
-    if (text_only and not turn_author and _same_as_active_turn_authorization(session, authorization)
+    if (not authorization.is_personal and text_only and not turn_author
+            and _same_as_active_turn_authorization(session, authorization)
             and text.strip() == _ac_inflight_original(session) != ""):
         return
     queued = {
@@ -206,7 +222,8 @@ def _enqueue_prompt(
     same_authorization = authorization.same_principal(
         existing_authorization or TurnAuthorization.from_raw(None)
     )
-    if (existing and same_authorization and text_only and not turn_author and isinstance(existing.get("text"), str)
+    if (existing and not authorization.is_personal and same_authorization and text_only
+            and not turn_author and isinstance(existing.get("text"), str)
             and not existing.get("image_paths") and not existing.get("turn_author")
             and not session.get("queued_prompts")):
         prev = existing["text"]
@@ -231,6 +248,10 @@ def _sanitize_queued_entry_vs_inflight_user(
     if not isinstance(entry, dict):
         return None
     entry_authorization = entry.get("turn_authorization")
+    if bool(getattr(entry_authorization, "is_personal", False)) or bool(
+        getattr(active_authorization, "is_personal", False)
+    ):
+        return entry
     same_authorization = (
         (active_authorization is None and not entry_authorization.is_personal)
         or (
@@ -380,6 +401,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     from agent.turn_authorization import TurnAuthorization
 
     rejected_messages = []
+    rejected_admissions = []
     queued = None
     turn_authorization = None
     use_compute_host = False
@@ -397,6 +419,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             turn_authorization = queued.get("turn_authorization") or TurnAuthorization.from_raw(None)
             compute_host_required = _session_uses_compute_host(session)
             if turn_authorization.has_token and turn_authorization.is_expired:
+                rejected_admissions.append((turn_authorization, "expired"))
                 rejected_messages.append(
                     "person authorization expired before the queued turn ran"
                 )
@@ -404,6 +427,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 session["last_active"] = time.time()
                 continue
             if turn_authorization.is_personal and compute_host_required:
+                rejected_admissions.append((turn_authorization, "isolation_rejected"))
                 rejected_messages.append(
                     "person-authorized turns are unavailable while turn isolation is enabled"
                 )
@@ -427,6 +451,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             break
         else:
             rejected_batch_has_more = bool(session.get("queued_prompt"))
+    for authorization, reason in rejected_admissions:
+        _emit_person_admission(sid, authorization, "terminal", reason=reason)
     for message in rejected_messages:
         _emit("error", sid, {"message": message})
     if queued is None:
@@ -462,7 +488,12 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 rid, sid, session, queued["text"], **kwargs, **author_kwargs
             ) is False:
                 dispatch_failed = True
-                restore_claim = True
+                # Static prompts preserve the historical retry behavior. A personal
+                # admission was already terminated by _run_prompt_submit and must
+                # not be replayed with the retired identifier.
+                restore_claim = not bool(
+                    getattr(turn_authorization, "is_personal", False)
+                )
         elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
             with session["history_lock"]:
                 session["running"] = False
@@ -472,6 +503,10 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             dispatch_failed = True
     except Exception as exc:
         _notif_log_failure("queued prompt dispatch failed", exc)
+        if bool(getattr(turn_authorization, "is_personal", False)):
+            _emit_person_admission(
+                sid, turn_authorization, "terminal", reason="dispatch_failed"
+            )
         _notif_release_turn(session)
         dispatch_failed = True
     if dispatch_failed:

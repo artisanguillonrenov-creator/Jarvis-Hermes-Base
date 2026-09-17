@@ -11,6 +11,7 @@ import pytest
 
 PERSON_A = "a" * 64
 PERSON_B = "b" * 64
+ADMISSION_A = "1" * 32
 
 
 def test_person_token_requires_stable_principal_id():
@@ -18,6 +19,35 @@ def test_person_token_requires_stable_principal_id():
 
     with pytest.raises(ValueError, match="principal id is required"):
         TurnAuthorization.from_raw("person-token", expires_at=time.time() + 3600)
+
+
+def test_person_prompt_requires_well_formed_private_admission_id():
+    from agent.turn_authorization import TurnAuthorization
+
+    with pytest.raises(ValueError, match="admission id is required"):
+        TurnAuthorization.from_raw(
+            "person-token",
+            expires_at=time.time() + 3600,
+            principal_id=PERSON_A,
+            require_admission=True,
+        )
+    with pytest.raises(ValueError, match="opaque identifier"):
+        TurnAuthorization.from_raw(
+            "person-token",
+            expires_at=time.time() + 3600,
+            principal_id=PERSON_A,
+            admission_id="browser-controlled",
+            require_admission=True,
+        )
+
+    holder = TurnAuthorization.from_raw(
+        "person-token",
+        expires_at=time.time() + 3600,
+        principal_id=PERSON_A,
+        admission_id=ADMISSION_A,
+        require_admission=True,
+    )
+    assert holder._fizko_admission_id() == ADMISSION_A
 
 
 @pytest.mark.parametrize("principal_id", ["short", "A" * 64, 123])

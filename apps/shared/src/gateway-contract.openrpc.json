@@ -2492,7 +2492,7 @@
     },
     {
       "name": "prompt.submit",
-      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide per-turn bearer, Unix expiry, and stable principal metadata.",
+      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide per-turn bearer, Unix expiry, stable principal, and private admission metadata.",
       "params": [
         {
           "name": "params",
@@ -16410,6 +16410,37 @@
         "title": "PendingApproval",
         "type": "object"
       },
+      "PersonAdmissionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_id": {
+            "title": "Admission Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "admission_id",
+          "status"
+        ],
+        "title": "PersonAdmissionPayload",
+        "type": "object"
+      },
       "PetCancelParams": {
         "additionalProperties": false,
         "properties": {
@@ -21937,6 +21968,19 @@
             "default": null,
             "description": "Trusted stable opaque owner id; required with the per-person bearer and expiry.",
             "title": "Fizko Person Principal Id"
+          },
+          "_fizko_person_admission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted private opaque id for this accepted prompt; required with a per-person bearer.",
+            "title": "Fizko Person Admission Id"
           }
         },
         "required": [
@@ -34136,6 +34180,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/PaneRevealPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "person.admission",
+      "summary": "Private exact-ID lifecycle accounting for a trusted personal prompt.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PersonAdmissionPayload"
           }
         }
       ]

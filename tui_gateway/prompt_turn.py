@@ -891,6 +891,12 @@ def _run_prompt_submit(
         sid, session, text, image_paths, queued_prompt_generation, display_kind,
         display_metadata, authorization)
     if admitted is None:
+        if admission_id := authorization._fizko_admission_id():
+            _emit("person.admission", sid, {
+                "admission_id": admission_id,
+                "status": "terminal",
+                "reason": "admission_rejected",
+            })
         with session["history_lock"]:
             _clear_active_turn_state(session, authorization)
         return False
@@ -909,6 +915,7 @@ def _run_prompt_submit(
         "kind=%s chars=%s images=%d",
         sid, session.get("session_key") or "", getattr(agent, "session_id", "") or "",
         display_kind or "user", len(text) if isinstance(text, str) else "-", len(images))
+    admission_id = authorization._fizko_admission_id()
     _emit("message.start", sid)
 
     def run():
@@ -917,6 +924,11 @@ def _run_prompt_submit(
             set_current_turn_authorization,
         )
 
+        if admission_id:
+            _emit("person.admission", sid, {
+                "admission_id": admission_id,
+                "status": "started",
+            })
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
@@ -959,6 +971,12 @@ def _run_prompt_submit(
             # End the authorization scope before persistence/events/follow-ups: none of those
             # surfaces may inherit or serialize the person's bearer.
             reset_current_turn_authorization(authorization_token)
+            if admission_id:
+                _emit("person.admission", sid, {
+                    "admission_id": admission_id,
+                    "status": "terminal",
+                    "reason": "finished",
+                })
             _finish_turn(sid, session, st)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
@@ -1008,6 +1026,7 @@ def _run_prompt_submit(
             finally:
                 reset_current_turn_authorization(descendant_token)
     run_thread = threading.Thread(target=run, daemon=True)
+    start_error = None
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
     with _routing_provenance_db(session) as routing_db, _sessions_lock:
@@ -1019,11 +1038,24 @@ def _run_prompt_submit(
             if registered is session:
                 _reopen_routed_session_row(routing_db, sid, session)
             session["_run_thread"] = run_thread
-            run_thread.start()
+            try:
+                run_thread.start()
+            except Exception as exc:
+                start_error = exc
+                can_start = False
+                session.pop("_run_thread", None)
     if not can_start:
+        if admission_id:
+            _emit("person.admission", sid, {
+                "admission_id": admission_id,
+                "status": "terminal",
+                "reason": "start_failed" if start_error is not None else "start_rejected",
+            })
         with session["history_lock"]:
             if _clear_active_turn_state(session, authorization):
                 session["running"] = False
+    if start_error is not None:
+        raise start_error
     return can_start
 
 
