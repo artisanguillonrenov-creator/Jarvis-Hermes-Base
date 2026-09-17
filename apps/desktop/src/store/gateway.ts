@@ -1,6 +1,7 @@
 import {
   type ConnectionState,
   type GatewayEvent,
+  JsonRpcGatewayError,
   reconnectBackoffDelayMs,
   registryBackendScopeKey,
   resolveGatewayWsUrl,
@@ -102,6 +103,14 @@ interface Secondary {
   gateway: HermesGateway
   /** True after this entry completed at least one socket connection. */
   openedOnce: boolean
+  /**
+   * Date.now() of the most recent socket 'open'. The live-work pruner's
+   * min-lifetime grace reads this: an idle prune can race an on-demand dial
+   * (prune → redial → prune) and close freshly opened sockets before their
+   * consumer registers in the keep-set, re-triggering the orphan-reap /
+   * remount loop (#94769). 0 = never opened.
+   */
+  lastOpenedAt: number
   activeRequests: number
   connectPromise: Promise<void> | null
   offEvent: () => void
@@ -670,6 +679,7 @@ async function openSecondary(entry: Secondary, spawnPriority: SpawnPriority = 'b
     }
 
     entry.openedOnce = true
+    entry.lastOpenedAt = Date.now()
     openedScopes.add(entry.scope)
 
     try {
@@ -834,6 +844,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
     connection: null,
     gateway,
     openedOnce: false,
+    lastOpenedAt: 0,
     activeRequests: 0,
     connectPromise: null,
     offEvent: () => {},
@@ -1770,6 +1781,46 @@ export async function ensureActiveGatewayOpen(): Promise<HermesGateway | null> {
 // activation before reporting the gateway as unavailable.
 const ACTIVE_GATEWAY_OPEN_WAIT_MS = 8_000
 
+// Grace period before the live-work pruner may dispose a freshly opened
+// secondary socket; see the min-lifetime guard in pruneSecondaryGateways
+// (#94769 prune ↔ redial race).
+const SECONDARY_MIN_LIFETIME_MS = 30_000
+
+// Wake-path liveness probe budget for a live-in-use secondary: mirrors
+// GATEWAY_LIVENESS_PROBE_TIMEOUT_MS in use-gateway-boot (the primary's probe).
+const SECONDARY_WAKE_PROBE_TIMEOUT_MS = 5_000
+
+// Probe a live-in-use secondary instead of blind-closing it on a forced wake,
+// and close it only when the probe proves it not alive. A half-open TCP
+// connection (sleep/wake, silent network drop) reports connectionState
+// 'open' forever and fires no close event, so without this close an in-flight
+// request rides a dead transport until its per-call timeout — prompt.submit's
+// is 30 minutes. Closing arms the entry's ordinary reconnect backoff via its
+// onState('closed') handler; a healthy-but-busy backend answers the ping and
+// keeps its socket (#94769 review).
+function probeSecondaryLiveness(entry: Secondary): void {
+  if (typeof entry.gateway.request !== 'function') {
+    return
+  }
+
+  void entry.gateway.request('ping', {}, SECONDARY_WAKE_PROBE_TIMEOUT_MS).catch((error: unknown) => {
+    // -32601 (method not found) = a version-skewed but HEALTHY backend that
+    // predates the ping method — the same compatibility carve-out the
+    // primary's probe makes in use-gateway-boot.
+    if (error instanceof JsonRpcGatewayError && error.code === -32601) {
+      return
+    }
+
+    // The entry may have been pruned or redialed while the probe was
+    // pending; only the very same socket may be torn down.
+    if (g.secondaries.get(entry.scope) !== entry || !isOpen(entry.gateway)) {
+      return
+    }
+
+    entry.gateway.close()
+  })
+}
+
 // Recovery signal: nudge every live secondary back open. Power-resume/network
 // signals can force sockets that still report open to retire before redialing.
 export function reconnectSecondaryGateways({ forceOpenSockets = false }: { forceOpenSockets?: boolean } = {}): void {
@@ -1788,6 +1839,21 @@ export function reconnectSecondaryGateways({ forceOpenSockets = false }: { force
 
     if (isOpen(entry.gateway)) {
       if (!forceOpenSockets) {
+        continue
+      }
+
+      // A forced wake (power resume / network online) used to close EVERY open
+      // secondary socket before redialing. Closing one that is mid-use detaches
+      // its runtime → the backend orphan-reaps it → `session.reclaimed` → the
+      // surface re-resumes on a fresh socket the same signal may close again:
+      // the #94769 flicker loop. But a live socket also cannot simply be
+      // SKIPPED: a half-open socket never fires a close event, so an in-flight
+      // request would hang until its per-call timeout. Probe liveness instead —
+      // a healthy-but-busy backend answers and keeps its socket; a dead
+      // transport is closed and healed by the ordinary reconnect backoff.
+      if (entry.activeRequests > 0 || foregroundPinned(entry)) {
+        probeSecondaryLiveness(entry)
+
         continue
       }
 
@@ -1946,6 +2012,18 @@ export function pruneSecondaryGateways(keep: Set<string>): void {
       // an orphaned lease expires on its own.
       (Number.isFinite(entry.activationLeaseUntil) && entry.activationLeaseUntil > now)
     ) {
+      continue
+    }
+
+    // Min-lifetime grace: an idle prune can race an on-demand dial (prune →
+    // redial → prune) and dispose a socket that opened moments ago, before
+    // its consumer registered in the keep-set — closing it detaches the
+    // runtime, the backend orphan-reaps it, and the reclaimed surface
+    // re-resumes on a fresh socket the next recompute closes again: the
+    // #94769 flicker loop. A young socket rides one prune tick; the idle
+    // reap still catches it on a later recompute. Number guard: legacy/HMR
+    // entries may predate the field.
+    if (entry.lastOpenedAt > 0 && now - entry.lastOpenedAt < SECONDARY_MIN_LIFETIME_MS) {
       continue
     }
 
