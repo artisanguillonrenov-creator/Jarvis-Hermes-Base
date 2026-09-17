@@ -352,6 +352,7 @@ class TestRepairCurrentCheckoutRuntimeRepair:
 
 
 class TestCmdUpdateBranchFallback:
+
     """cmd_update falls back to main when current branch has no remote counterpart."""
 
 
