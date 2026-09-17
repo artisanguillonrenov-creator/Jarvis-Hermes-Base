@@ -3895,10 +3895,55 @@ class TelegramAdapter(BasePlatformAdapter):
     _EA_CODE_OPEN = "<pre>"
     _EA_CODE_CLOSE = "</pre>\n\n"
     _EA_SMART_DENY_LINE = "\n\n<b>Smart DENY:</b> owner override applies to this one operation only."
-    _EA_CMD_BUDGET = 3800
+    _EA_REASON_BUDGET = 512
 
     def _ea_escape(self, text: str) -> str:
         return _html.escape(text)
+
+    @staticmethod
+    def _telegram_text_units(text: str) -> int:
+        """Telegram measures a message's 4096-character cap in UTF-16 units."""
+        return len(text.encode("utf-16-le")) // 2
+
+    def _truncate_approval_field(self, text: str, budget: int) -> str:
+        """Fit a dynamic HTML field in ``budget`` encoded Telegram text units."""
+        text = str(text or "")
+        if self._telegram_text_units(self._ea_escape(text)) <= budget:
+            return text
+
+        suffix = "..."
+        suffix_units = self._telegram_text_units(self._ea_escape(suffix))
+        if budget < suffix_units:
+            return ""
+
+        used = 0
+        chars = []
+        for char in text:
+            char_units = self._telegram_text_units(self._ea_escape(char))
+            if used + char_units + suffix_units > budget:
+                break
+            chars.append(char)
+            used += char_units
+        return "".join(chars) + suffix
+
+    def _format_exec_approval(
+        self, command: str, description: str = "dangerous command", smart_denied: bool = False) -> str:
+        """Format an HTML approval card within Telegram's message limit.
+
+        Escaping can make a short source command much larger on the wire, so reserve the
+        fixed framing (including the optional smart-deny line) before fitting each dynamic field.
+        """
+        description = self._truncate_approval_field(description, self._EA_REASON_BUDGET)
+
+        def render(command_preview: str) -> str:
+            text = (f"{self._EA_HEADER}"
+                    f"{self._EA_CODE_OPEN}{self._ea_escape(command_preview)}{self._EA_CODE_CLOSE}"
+                    f"{self._EA_REASON_LABEL}{self._ea_escape(description)}"
+                    f"{self._ea_deadline_line()}")
+            return text + self._EA_SMART_DENY_LINE if smart_denied else text
+
+        command_budget = max(0, self.MAX_MESSAGE_LENGTH - self._telegram_text_units(render("")))
+        return render(self._truncate_approval_field(command, command_budget))
 
     _EA_ACTION_LABELS = {"once": "✅ Allow Once", "session": "✅ Session", "always": "✅ Always", "deny": "❌ Deny"}
 

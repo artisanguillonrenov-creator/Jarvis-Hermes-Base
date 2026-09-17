@@ -77,6 +77,25 @@ class TestTelegramExecApproval:
         assert "dangerous deletion" in kwargs["text"]
         assert kwargs["reply_markup"] is not None  # InlineKeyboardMarkup
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("smart_denied", [False, True])
+    async def test_oversized_escaped_approval_text_keeps_inline_keyboard(self, smart_denied):
+        """Escaped dynamic fields must fit Telegram's 4096 UTF-16-unit message limit."""
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="&" * 5000,
+            session_key="s",
+            description="<reason>" * 1000,
+            smart_denied=smart_denied,
+        )
+
+        kwargs = adapter._bot.send_message.call_args.kwargs
+        assert len(kwargs["text"].encode("utf-16-le")) // 2 <= 4096
+        assert kwargs["reply_markup"] is not None
+
 
     @pytest.mark.asyncio
     async def test_non_smart_allow_permanent_false_keeps_session(self, monkeypatch):
@@ -331,4 +350,3 @@ class TestTelegramApprovalCallback:
         assert runner.last_source is not None
         assert runner.last_source.platform == Platform.TELEGRAM
         assert runner.last_source.user_id == "222"
-
