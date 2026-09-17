@@ -64,6 +64,9 @@ class TestHermesAuthWriteDenial:
         env = LocalEnvironment(cwd=str(tmp_path))
         ops = ShellFileOperations(env, cwd=str(tmp_path))
         monkeypatch.setattr(file_tools, "_get_file_ops", lambda task_id="default": ops)
+        # Stale-overwrite runs before ShellFileOperations' credential denylist;
+        # disable it here so the handler test exercises auth.json write denial.
+        monkeypatch.setattr(file_tools, "_stale_overwrite_blocker", lambda *a, **k: None)
 
         write_entry = registry.get_entry("write_file")
         patch_entry = registry.get_entry("patch")
