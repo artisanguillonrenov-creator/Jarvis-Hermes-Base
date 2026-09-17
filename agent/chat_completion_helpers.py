@@ -3002,7 +3002,7 @@ class _StreamingCall(StreamingWaitMonitor):
         return final_response
 
     @staticmethod
-    def _assemble_tool_calls(tool_calls_acc, finish_reason):
+    def _assemble_tool_calls(tool_calls_acc, finish_reason, model_name=None, session_id=None):
         """Materialize accumulated tool calls; flag truncated/unrepairable args."""
         mock_tool_calls = []
         has_truncated_tool_args = False
@@ -3013,11 +3013,19 @@ class _StreamingCall(StreamingWaitMonitor):
                 try:
                     json.loads(arguments)
                 except json.JSONDecodeError:
-                    # Repair before flagging (GLM via Ollama); "{}" = unrepairable.
-                    repaired = _repair_tool_call_arguments(arguments, tc["function"]["name"] or "?")
+                    # Repair before flagging (GLM via Ollama); unrepairable args get a
+                    # sentinel object — FAIL-CLOSED (RCA 2026-09-17): executing "{}" ran
+                    # tools as silent no-ops (memory/skill_manage writes lost). The sentinel
+                    # is wire-valid JSON and is dropped from execution in run_tool_round,
+                    # which appends a re-issue error result instead.
+                    repaired = _repair_tool_call_arguments(
+                        arguments, tc["function"]["name"] or "?",
+                        model=model_name, session=session_id,
+                    )
                     if repaired != "{}":
                         arguments = repaired
                     else:
+                        arguments = json.dumps({"__hermes_malformed_tool_arguments__": True})
                         has_truncated_tool_args = True
             elif finish_reason is None:
                 # Name arrived, zero arg bytes, no finish_reason: unflagged this
@@ -3037,7 +3045,11 @@ class _StreamingCall(StreamingWaitMonitor):
         args or stamping "stop"."""
         full_content = "".join(content_parts) or None
         full_reasoning = "".join(reasoning_parts) or None
-        mock_tool_calls, has_truncated_tool_args = self._assemble_tool_calls(tool_calls_acc, finish_reason)
+        mock_tool_calls, has_truncated_tool_args = self._assemble_tool_calls(
+            tool_calls_acc, finish_reason,
+            model_name=model_name,
+            session_id=getattr(self.agent, "session_id", None) or getattr(self.agent, "session", None),
+        )
         # Zero-chunk guard: nothing usable = upstream error / malformed SSE.
         if finish_reason is None and not content_parts and not reasoning_parts and not refusal_parts and not tool_calls_acc:
             raise EmptyStreamError(
