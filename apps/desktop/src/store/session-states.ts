@@ -65,6 +65,7 @@ import {
   type SessionOwnerScope,
   type SessionProfileRoute
 } from './session-request-router'
+import { $sessionTranscriptViewGates, clearTranscriptViewGate } from './session-transcript-view'
 import { ackStoredSessionId, markSessionUnreadFinished } from './session-unread'
 import { isBrowserWindow, isSecondaryWindow } from './windows'
 
@@ -585,6 +586,7 @@ export function publishSessionState(runtimeId: string, state: ClientSessionState
 /** Keep the cheap status projection for a cold session while releasing its
  * transcript. Unread completion is stored separately, so it survives too. */
 export function releaseSessionTranscript(runtimeId: string, state?: ClientSessionState) {
+  clearTranscriptViewGate(runtimeId)
   const current = $sessionStates.get()
 
   if (!(runtimeId in current)) {
@@ -607,6 +609,7 @@ export function releaseSessionTranscript(runtimeId: string, state?: ClientSessio
 }
 
 export function dropSessionState(runtimeId: string) {
+  clearTranscriptViewGate(runtimeId)
   // Disarm the watchdog — a dropped runtime must not fire a stale clear later.
   // Settle-grace entries are keyed by stored id and self-expire; leave them so
   // a just-finished session's row survives merge eviction even if its tile or
@@ -633,6 +636,8 @@ export function dropSessionState(runtimeId: string) {
  *  wiped gateway's sessions must not fire stale clears or linger in the
  *  sidebar merge keep-set after the switch. */
 export function clearAllSessionStates() {
+  $sessionTranscriptViewGates.set({})
+
   for (const timer of sessionWatchdogTimers.values()) {
     clearTimeout(timer)
   }
