@@ -32,6 +32,7 @@ TOUCH_PROMPT = "Reply with exactly one word: the capital of France."
 TOUCH_EXPECT = "paris"
 _RESTART_BACKOFF_S = (1, 5, 15, 60)
 _RESIDENT = ("loaded", "ready")
+_CUDA_INIT_FAILURE = "ggml_cuda_init: failed to initialize cuda"
 
 # Chosen once and reused across restarts: sessions persist the resolved base_url, so an ephemeral
 # port would strand every resumed session after each restart. Deliberately NOT 8080 so we never
@@ -137,6 +138,7 @@ class LlamaServerSupervisor:
         self._state: dict | None = None
         self._watchdog: threading.Thread | None = None
         self._log_handle = None
+        self._log_start_offset = 0
         self._idle_since: dict[str, float] = {}
 
     # ── endpoints ────────────────────────────────────────────
@@ -193,6 +195,7 @@ class LlamaServerSupervisor:
             # The crash-restart loop calls _spawn repeatedly; each restart would leak one fd.
             _quiet(self._log_handle.close)
         self._log_handle = open(self.log_path, "a", encoding="utf-8", errors="replace")
+        self._log_start_offset = self._log_handle.tell()
         self._log_handle.write(f"\n# spawn: {cmd}\n")
         self._log_handle.flush()
         # list-args, never a shell: spaced paths (user homes) must survive.
@@ -242,6 +245,20 @@ class LlamaServerSupervisor:
                         return
             time.sleep(1)
         raise TimeoutError(f"llama-server not healthy after {timeout_s}s (log: {self.log_path})")
+
+    def cuda_initialization_failed(self) -> bool:
+        """Whether this spawn logged llama.cpp's CUDA-init failure.
+
+        llama-server can answer ``/health`` after this error while silently loading every model on
+        the CPU. Read only this process incarnation's log tail so an old failed boot never
+        demotes a later healthy CUDA server.
+        """
+        try:
+            with open(self.log_path, encoding="utf-8", errors="replace") as log:
+                log.seek(self._log_start_offset)
+                return _CUDA_INIT_FAILURE in log.read().lower()
+        except OSError:
+            return False
 
     def _watch(self) -> None:
         """Restart the router (not its children) on crash, with backoff."""
