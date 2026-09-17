@@ -753,9 +753,76 @@ class TestWebServerEndpoints:
             200
         ] * len(paths)
 
+    def test_concurrent_startup_reconciles_one_read_only_open_at_a_time(
+        self, monkeypatch, tmp_path
+    ):
+        """Startup and first polls must not overlap pysqlite initialization (#113186)."""
+        from concurrent.futures import ThreadPoolExecutor
 
+        import hermes_state
 
+        db_path = tmp_path / "state.db"
+        db_path.write_bytes(b"healthy")
+        entered = threading.Event()
+        overlap = threading.Event()
+        release = threading.Event()
+        active = 0
+        max_active = 0
+        guard = threading.Lock()
 
+        class SlowReadOnlyDB:
+            _conn = None
+
+            def __init__(self, *, db_path, read_only=False, **_kwargs):
+                nonlocal active, max_active
+                assert read_only
+                self.db_path = db_path
+                with guard:
+                    active += 1
+                    max_active = max(max_active, active)
+                    entered.set()
+                    if active > 1:
+                        overlap.set()
+                release.wait(timeout=1)
+                with guard:
+                    active -= 1
+
+            def close(self):
+                nonlocal active, max_active
+                with guard:
+                    active += 1
+                    max_active = max(max_active, active)
+                    entered.set()
+                    if active > 1:
+                        overlap.set()
+                release.wait(timeout=1)
+                with guard:
+                    active -= 1
+
+        monkeypatch.setattr(hermes_state, "SessionDB", SlowReadOnlyDB)
+        monkeypatch.setattr(hermes_state, "_default_db_path", lambda: db_path)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            start = threading.Barrier(8)
+
+            def reconcile():
+                start.wait()
+                _web_server_lifecycle._eager_reconcile_own_session_db()
+
+            futures = [
+                pool.submit(reconcile)
+                for _ in range(8)
+            ]
+            try:
+                assert entered.wait(timeout=1)
+                overlap.wait(timeout=0.5)
+            finally:
+                release.set()
+            for future in futures:
+                future.result(timeout=2)
+
+        assert not overlap.is_set()
+        assert max_active == 1
 
     def test_messaging_platforms_profile_scopes_gateway_reads(self, monkeypatch):
         """?profile=<name> must resolve liveness from the profile's own home.

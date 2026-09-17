@@ -182,10 +182,17 @@ def _eager_reconcile_own_session_db() -> None:
     raises: an unfixable store still gets the per-poll read-probe heal.
     """
     try:
-        from hermes_cli.web_server_sessions import _open_session_db_for_profile
+        from hermes_cli.web_server_sessions import (
+            _open_session_db_for_profile,
+            _session_db_path_for_profile,
+            _session_db_startup_reconcile_lock_for,
+        )
         from hermes_state_registry import release_or_close
 
-        release_or_close(_open_session_db_for_profile(None, read_only=True))
+        # Keep the shared lock through close: pysqlite must not initialize a
+        # sibling read-only handle while this startup worker tears one down.
+        with _session_db_startup_reconcile_lock_for(_session_db_path_for_profile(None)):
+            release_or_close(_open_session_db_for_profile(None, read_only=True))
     except Exception as exc:
         _log.warning(
             "startup schema reconcile of state.db failed (%s); session "
