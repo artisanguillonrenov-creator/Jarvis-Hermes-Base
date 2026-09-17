@@ -63,6 +63,14 @@ afterEach(() => {
 })
 
 describe('ComposerTriggerPopover i18n', () => {
+  it('uses a near-opaque background for mention suggestions', () => {
+    const { container } = renderPopover('@')
+
+    expect(container.querySelector('[data-slot="composer-completion-drawer"]')?.className).toContain(
+      'bg-[color-mix(in_srgb,var(--dt-card)_92%,transparent)]'
+    )
+  })
+
   it('renders localized empty lookup copy for @ references', () => {
     const { container } = renderPopover('@')
 
