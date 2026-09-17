@@ -108,10 +108,13 @@ def _plan_goal_compression_recovery(
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
     queued_prompt_generation: int | None, display_kind: str | None,
-    display_metadata: dict | None) -> tuple[list[str], Any] | None:
+    display_metadata: dict | None, turn_authorization=None,
+) -> tuple[list[str], Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    from tui_gateway.session_auto_continue import _clear_active_turn_state
+
     # When the session already holds its lease this is a cheap dict check. See #94778.
     if (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
         logger.info(
@@ -119,14 +122,16 @@ def _admit_prompt_turn(
             session.get("session_key") or sid,
             getattr(ownership_refusal, "reason", None) or "refused")
         with session["history_lock"]:
-            session["running"] = False
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
         _emit("error", sid, {"message": str(ownership_refusal)})
         return None
     with session["history_lock"]:
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
-            session["running"] = False
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
             return None
         images = list(session.get("attached_images", []) if image_paths is None else image_paths)
         if image_paths is None:
@@ -158,7 +163,9 @@ def _admit_prompt_turn(
     return images, agent
 
 
-def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True) -> str:
+def _record_turn_marker(
+    session: dict, text: Any, *, auto_continue: bool = True, turn_authorization=None
+) -> str:
     """Write the durable crash marker; returns the session key it was written under (compression
     can rotate session_key mid-turn).  A surviving marker means the process died mid-turn.
     The key is published before the disk write so an interrupt racing startup can retire
@@ -170,8 +177,13 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True)
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
-        record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue)
+        record_turn_start(
+            marker_home, marker_key, marker_text, attempts=marker_attempt,
+            auto_continue=auto_continue,
+            personal_authorization_blocked=bool(
+                getattr(turn_authorization, "is_personal", False)
+            ),
+        )
         with session["history_lock"]:
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
         if marker_cancelled:
@@ -397,12 +409,14 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
-                            on_done=None, on_error=None) -> None:
+                            on_done=None, on_error=None, turn_authorization=None) -> None:
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
     release ``running``."""
     try:
         _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, prompt)
+        _run_prompt_submit(
+            rid, sid, session, prompt, turn_authorization=turn_authorization
+        )
         if on_done is not None:
             on_done()
     except Exception as exc:
@@ -414,7 +428,9 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 
 def _run_post_turn_followups(
-    rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
+    rid, sid: str, session: dict, result: Any, goal_followup: str | None,
+    *, descendant_authorization=None,
+) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
@@ -422,7 +438,10 @@ def _run_post_turn_followups(
     steer = result.get("pending_steer") if isinstance(result, dict) else None
     if isinstance(steer, str) and steer.strip():
         with session["history_lock"]:
-            _enqueue_prompt(session, steer, session.get("transport"))
+            _enqueue_prompt(
+                session, steer, session.get("transport"),
+                turn_authorization=descendant_authorization,
+            )
     if _drain_queued_prompt(rid, sid, session):
         return
     if goal_followup:
@@ -430,7 +449,10 @@ def _run_post_turn_followups(
             if session.get("running"):
                 return  # user already sent something — their turn wins
             session["running"] = True
-        _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
+        _dispatch_followup_turn(
+            rid, sid, session, goal_followup, "goal continuation dispatch",
+            turn_authorization=descendant_authorization,
+        )
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
@@ -845,7 +867,10 @@ def _run_prompt_submit(
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
-    turn_author: dict | None = None) -> bool:
+    turn_author: dict | None = None, turn_authorization=None) -> bool:
+    from agent.turn_authorization import TurnAuthorization
+    from tui_gateway.session_auto_continue import _clear_active_turn_state
+
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -854,9 +879,23 @@ def _run_prompt_submit(
         logger.warning(
             "prompt dispatch: session store unavailable for %s — this turn may not persist",
             session.get("session_key") or sid)
+    authorization = turn_authorization or TurnAuthorization.from_raw(None)
+    with session["history_lock"]:
+        # Synthesized callers predate explicit authorization admission. Give
+        # their already-claimed inline turn an opaque no-token holder too, so
+        # all completion/failure cleanup uses the same identity fence.
+        if session.get("running") and session.get("_active_turn_authorization") is None:
+            session["_active_turn_authorization"] = authorization
+            session.setdefault("_active_turn_route", "inline")
     admitted = _admit_prompt_turn(
-        sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata)
+        sid, session, text, image_paths, queued_prompt_generation, display_kind,
+        display_metadata, authorization)
     if admitted is None:
+        _emit_person_admission(
+            sid, authorization, "terminal", reason="admission_rejected"
+        )
+        with session["history_lock"]:
+            _clear_active_turn_state(session, authorization)
         return False
     images, agent = admitted
     # The ONE INFO record proving a prompt was accepted by THIS process; ties ui sid,
@@ -876,6 +915,12 @@ def _run_prompt_submit(
     _emit("message.start", sid)
 
     def run():
+        from agent.turn_authorization import (
+            reset_current_turn_authorization,
+            set_current_turn_authorization,
+        )
+
+        _emit_person_admission(sid, authorization, "started")
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
@@ -883,8 +928,13 @@ def _run_prompt_submit(
         st = _TurnRun(
             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
             receipt_committed=terminal_callback is None)
-        st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None)
+        st.marker_key = _record_turn_marker(
+            session, text, auto_continue=terminal_callback is None,
+            turn_authorization=authorization,
+        )
         goal_followup = None
+        terminal_reason = "run_failed"
+        authorization_token = set_current_turn_authorization(authorization)
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
@@ -908,20 +958,28 @@ def _run_prompt_submit(
             # Goal judge + loop tick evaluation mutate persisted state AFTER message.complete: publish the
             # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
             _publish_session_control_snapshot(sid, session, only_if_present=True)
+            terminal_reason = "finished"
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
+            # End the authorization scope before persistence/events/follow-ups: none of those
+            # surfaces may inherit or serialize the person's bearer.
+            reset_current_turn_authorization(authorization_token)
+            _emit_person_admission(
+                sid, authorization, "terminal", reason=terminal_reason
+            )
             _finish_turn(sid, session, st)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
             # A stale interim closure must not fire during a later turn.
             st.agent.interim_assistant_callback = None
             with session["history_lock"]:
-                session["running"] = False
-                session["last_active"] = time.time()
-                if not st.error_retained:
-                    _clear_inflight_turn(session)
-                _release_hosted_room_turn_slot(session)
+                if _clear_active_turn_state(session, authorization):
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    if not st.error_retained:
+                        _clear_inflight_turn(session)
+                    _release_hosted_room_turn_slot(session)
             # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
             # agent.session_id is re-read because compression may have rotated it (an
             # accepted/finished pair whose id changed IS a rotation trace).
@@ -944,8 +1002,31 @@ def _run_prompt_submit(
                     session.pop("_hosted_room_task", None)
             session.pop("_auto_continue_scheduled", None)
             _emit_settled_session_info(sid, session, st.agent)
-        _run_post_turn_followups(rid, sid, session, st.result, goal_followup)
-    run_thread = threading.Thread(target=run, daemon=True)
+        descendant_authorization = (
+            TurnAuthorization.blocked() if authorization.is_personal else None
+        )
+        if descendant_authorization is None:
+            _run_post_turn_followups(rid, sid, session, st.result, goal_followup)
+        else:
+            descendant_token = set_current_turn_authorization(descendant_authorization)
+            try:
+                _run_post_turn_followups(
+                    rid, sid, session, st.result, goal_followup,
+                    descendant_authorization=descendant_authorization,
+                )
+            finally:
+                reset_current_turn_authorization(descendant_token)
+    def guarded_run():
+        try:
+            run()
+        except BaseException:
+            _emit_person_admission(
+                sid, authorization, "terminal", reason="run_failed"
+            )
+            raise
+
+    run_thread = threading.Thread(target=guarded_run, daemon=True)
+    start_error = None
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
     with _routing_provenance_db(session) as routing_db, _sessions_lock:
@@ -957,10 +1038,22 @@ def _run_prompt_submit(
             if registered is session:
                 _reopen_routed_session_row(routing_db, sid, session)
             session["_run_thread"] = run_thread
-            run_thread.start()
+            try:
+                run_thread.start()
+            except Exception as exc:
+                start_error = exc
+                can_start = False
+                session.pop("_run_thread", None)
     if not can_start:
+        _emit_person_admission(
+            sid, authorization, "terminal",
+            reason="start_failed" if start_error is not None else "start_rejected",
+        )
         with session["history_lock"]:
-            session["running"] = False
+            if _clear_active_turn_state(session, authorization):
+                session["running"] = False
+    if start_error is not None:
+        raise start_error
     return can_start
 
 

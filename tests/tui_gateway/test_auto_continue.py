@@ -18,6 +18,7 @@ time is positive proof the turn never finished. Contract pinned here:
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import types
@@ -117,6 +118,23 @@ def test_marker_roundtrip(tmp_path):
     assert read_turn_marker(tmp_path, "abc") is None
 
 
+def test_personal_crash_marker_persists_only_non_secret_blocked_flag(tmp_path):
+    secret = "never-write-this-bearer"
+    record_turn_start(
+        tmp_path,
+        "personal",
+        "continue safely",
+        personal_authorization_blocked=True,
+    )
+
+    raw = (tmp_path / "desktop" / "interrupted_turns.json").read_text()
+    marker = read_turn_marker(tmp_path, "personal")
+
+    assert secret not in raw
+    assert json.loads(raw)["personal"]["personal_authorization_blocked"] is True
+    assert marker["personal_authorization_blocked"] is True
+
+
 def test_marker_survives_corrupt_sidecar(tmp_path):
     path = tmp_path / "desktop" / "interrupted_turns.json"
     path.parent.mkdir(parents=True)
@@ -181,12 +199,18 @@ def test_interrupt_racing_marker_write_cannot_leave_recovery_state(
     session = _session(agent=agent, running=True)
     _patch_local_interrupt(monkeypatch, session)
 
-    def write_after_stop(home, key, prompt, *, attempts=0, auto_continue=True):
+    def write_after_stop(
+        home, key, prompt, *, attempts=0, auto_continue=True,
+        personal_authorization_blocked=False,
+    ):
         response = server._methods["session.interrupt"](
             "stop-during-write", {"session_id": "runtime-race"}
         )
         assert response["result"]["status"] == "interrupted"
-        record_turn_start(home, key, prompt, attempts=attempts, auto_continue=auto_continue)
+        record_turn_start(
+            home, key, prompt, attempts=attempts, auto_continue=auto_continue,
+            personal_authorization_blocked=personal_authorization_blocked,
+        )
 
     monkeypatch.setattr(server, "record_turn_start", write_after_stop)
 
@@ -384,7 +408,26 @@ def test_fresh_marker_schedules_continuation(emits, schedule_env, marker_home):
     assert text.startswith("[System note: Your previous turn was interrupted")
     assert "fix the flaky test" in text
     assert kwargs["display_kind"] == "auto_continue"
+    assert "turn_authorization" not in kwargs
     assert ("message.start", "sid", None) in [(e, s, p) for e, s, p in emits]
+
+
+def test_personal_marker_auto_continue_uses_blocked_authorization(
+    emits, schedule_env, marker_home
+):
+    record_turn_start(
+        marker_home,
+        "session-key",
+        "personal work",
+        personal_authorization_blocked=True,
+    )
+
+    assert server._maybe_schedule_auto_continue("sid", _session(), "session-key") is not None
+
+    (_text, kwargs), = schedule_env
+    authorization = kwargs["turn_authorization"]
+    assert authorization.is_personal is True
+    assert authorization.has_token is False
 
 
 def test_hosted_room_marker_is_left_to_the_driver(schedule_env, marker_home):

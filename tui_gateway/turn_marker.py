@@ -73,14 +73,16 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
-                      auto_continue: bool = True) -> None:
+                      auto_continue: bool = True,
+                      personal_authorization_blocked: bool = False) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume."""
     if not session_key or not prompt:
         return
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
-             "auto_continue": bool(auto_continue)}
+             "auto_continue": bool(auto_continue),
+             "personal_authorization_blocked": bool(personal_authorization_blocked)}
     _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
 
 
@@ -97,10 +99,13 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
     try:
         with _lock:
             entry = _load(_marker_path(home)).get(session_key)
-        prompt = str(entry.get("prompt") or "") if isinstance(entry, dict) else ""
+        if not isinstance(entry, dict):
+            return None
+        prompt = str(entry.get("prompt") or "")
         if not prompt.strip():
             return None
         return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry),
-                "auto_continue": bool(entry.get("auto_continue", True))}
+                "auto_continue": bool(entry.get("auto_continue", True)),
+                "personal_authorization_blocked": bool(entry.get("personal_authorization_blocked", False))}
     except Exception:
         return None

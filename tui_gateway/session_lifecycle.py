@@ -228,6 +228,16 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    sid = _lifecycle_own_sid(session)
+    with (session.get("history_lock") or contextlib.nullcontext()):
+        abandoned_admissions = _collect_person_admissions(session)
+        _clear_active_turn_state(session)
+        session["queued_prompt"] = None
+        session.pop("queued_prompts", None)
+        session["_queued_prompt_generation"] = int(
+            session.get("_queued_prompt_generation", 0)
+        ) + 1
+    _emit_person_admissions(sid, abandoned_admissions, reason="session_finalized")
     _lock_vault_managers(session)
     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"
@@ -417,11 +427,50 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None) -> bool:
+def _interrupt_session_turn(
+    sid: str,
+    session: dict,
+    *,
+    request_id: str | None = None,
+    reject_person_authorized: bool = False,
+    expected_person_authorization=None,
+) -> bool | None:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
     channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics."""
-    use_compute_host = _session_uses_compute_host(session)
-    should_interrupt = bool(session.get("running"))
+    use_compute_host = _session_active_turn_uses_compute_host(session)
+    dropped_queued_authorizations = []
+    abandoned_authorization = None
+    with session["history_lock"]:
+        if reject_person_authorized:
+            authorization = session.get("_active_turn_authorization")
+            if session.get("running") and authorization is not None and authorization.is_personal:
+                if (
+                    expected_person_authorization is None
+                    or not expected_person_authorization.has_token
+                    or expected_person_authorization.is_expired
+                    or not authorization.same_principal(expected_person_authorization)
+                ):
+                    return None
+        should_interrupt = bool(session.get("running"))
+        session["_turn_cancel_requested"] = True
+        queued_entries = [session.get("queued_prompt"), *(session.get("queued_prompts") or [])]
+        dropped_queued_authorizations = [
+            entry.get("turn_authorization")
+            for entry in queued_entries
+            if isinstance(entry, dict)
+            and bool(getattr(entry.get("turn_authorization"), "is_personal", False))
+        ]
+        session["queued_prompt"] = None
+        session.pop("queued_prompts", None)
+        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+        if not should_interrupt:
+            abandoned_authorization = session.get("_active_turn_authorization")
+            _clear_active_turn_state(session)
+    _emit_person_admissions(
+        sid, dropped_queued_authorizations, reason="interrupted_while_queued"
+    )
+    if bool(getattr(abandoned_authorization, "is_personal", False)):
+        _emit_person_admissions(sid, [abandoned_authorization], reason="interrupted")
     run_thread_alive = False
     if use_compute_host:
         # The host owns the live turn (parent `running` can lag a blocked tool), so let it decide. Gate on
@@ -430,11 +479,6 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
             _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
     else:
         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
-    with session["history_lock"]:
-        session["_turn_cancel_requested"] = True
-        session["queued_prompt"] = None
-        session.pop("queued_prompts", None)
-        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
@@ -452,10 +496,17 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
             from agent.interrupt_compat import request_hard_interrupt
             request_hard_interrupt(session.get("agent"))
         if not run_thread_alive:
+            stalled_authorization = None
             with session["history_lock"]:
                 if session.get("running"):
+                    stalled_authorization = session.get("_active_turn_authorization")
                     session["running"] = False
                     _clear_inflight_turn(session)
+                    _clear_active_turn_state(session)
+            if bool(getattr(stalled_authorization, "is_personal", False)):
+                _emit_person_admissions(
+                    sid, [stalled_authorization], reason="interrupted"
+                )
     _clear_pending(sid)
     with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval

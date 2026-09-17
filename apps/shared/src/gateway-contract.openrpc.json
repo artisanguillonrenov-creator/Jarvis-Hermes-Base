@@ -2492,7 +2492,7 @@
     },
     {
       "name": "prompt.submit",
-      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing.",
+      "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. Trusted personal callers must provide per-turn bearer, Unix expiry, stable principal, and private admission metadata.",
       "params": [
         {
           "name": "params",
@@ -2924,7 +2924,7 @@
     },
     {
       "name": "session.interrupt",
-      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker.",
+      "summary": "Stop the running turn (and streaming TTS); retires the crash-recovery marker. A personal turn requires its matching, unexpired per-turn bearer and expiry metadata.",
       "params": [
         {
           "name": "params",
@@ -16410,6 +16410,37 @@
         "title": "PendingApproval",
         "type": "object"
       },
+      "PersonAdmissionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_id": {
+            "title": "Admission Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "admission_id",
+          "status"
+        ],
+        "title": "PersonAdmissionPayload",
+        "type": "object"
+      },
       "PetCancelParams": {
         "additionalProperties": false,
         "properties": {
@@ -21898,6 +21929,58 @@
             ],
             "default": null,
             "title": "Rebind Survivor Row Ids"
+          },
+          "_fizko_person_access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted per-person bearer for this turn only. Requires _fizko_person_access_token_expires_at and is never persisted.",
+            "title": "Fizko Person Access Token"
+          },
+          "_fizko_person_access_token_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Unix expiry timestamp for the per-person bearer; required when the bearer is present.",
+            "title": "Fizko Person Access Token Expires At"
+          },
+          "_fizko_person_principal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted stable opaque owner id; required with the per-person bearer and expiry.",
+            "title": "Fizko Person Principal Id"
+          },
+          "_fizko_person_admission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted private opaque id for this accepted prompt; required with a per-person bearer.",
+            "title": "Fizko Person Admission Id"
           }
         },
         "required": [
@@ -25807,6 +25890,45 @@
             ],
             "default": null,
             "title": "Expected Hosted Task Id"
+          },
+          "_fizko_person_access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted per-person bearer matching the active personal turn.",
+            "title": "Fizko Person Access Token"
+          },
+          "_fizko_person_access_token_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Unix expiry timestamp; required and must still be valid for a personal interrupt.",
+            "title": "Fizko Person Access Token Expires At"
+          },
+          "_fizko_person_principal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trusted stable opaque owner id matching the active personal turn.",
+            "title": "Fizko Person Principal Id"
           }
         },
         "required": [
@@ -34058,6 +34180,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/PaneRevealPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "person.admission",
+      "summary": "Private exact-ID lifecycle accounting for a trusted personal prompt.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PersonAdmissionPayload"
           }
         }
       ]
