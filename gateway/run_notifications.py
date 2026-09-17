@@ -259,7 +259,9 @@ class GatewayNotificationsMixin:
                 session_entry.session_key, prior_session_id, target_session_id,
             )
         else:
-            switched = await self.async_session_store.switch_session(session_entry.session_key, target_session_id)
+            switched = await self.async_session_store.switch_session_if_current(
+                session_entry.session_key, prior_session_id, target_session_id,
+            )
         if switched is None:
             logger.warning(
                 "Async-delegation completion could not bind routing key %s to "

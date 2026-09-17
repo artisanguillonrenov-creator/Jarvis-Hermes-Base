@@ -1200,6 +1200,43 @@ class SessionStore(
             )
         return new_entry
 
+    def switch_session_if_current(
+        self, session_key: str, expected_session_id: str, target_session_id: str,
+    ) -> Optional[SessionEntry]:
+        """Switch a route only when it still points at the caller's snapshot.
+
+        Async completion delivery resolves its pinned parent outside the routing lock. A reset or
+        a concurrent route switch may therefore replace the route before delivery returns. Keep
+        that newer choice instead of letting the stale completion overwrite it.
+        """
+        if not session_key or not expected_session_id or not target_session_id:
+            return None
+        with self._lock:
+            old_entry = self._entry_locked(session_key)
+            if old_entry is None or old_entry.session_id != expected_session_id:
+                return None
+            if old_entry.session_id == target_session_id:
+                return old_entry
+            new_entry = self._replace_route_locked(
+                session_key, old_entry, target_session_id, _now(),
+                display_name=old_entry.display_name,
+            )
+
+        if self._db_for_key(session_key) and old_entry.session_id:
+            self._promote_session_reset(
+                session_key, old_entry.session_id, "session_switch",
+                log=lambda e: logger.debug("Session DB end_session failed: %s", e),
+            )
+        if self._db_for_key(session_key):
+            self._reopen_session_row(
+                session_key, target_session_id, log_prefix="Session DB reopen_session failed"
+            )
+            self._record_gateway_session_peer(
+                target_session_id, session_key, new_entry.origin,
+                display_name=new_entry.display_name, include_compression_ancestors=True,
+            )
+        return new_entry
+
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
         """List all sessions, optionally filtered by activity."""
         with self._lock:
