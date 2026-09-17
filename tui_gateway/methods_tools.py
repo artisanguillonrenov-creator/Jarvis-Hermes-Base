@@ -914,6 +914,17 @@ def _(rid, params: dict) -> dict:
 
 
 # ─── Insights / rollback / browser / config ──────────────────────────────────
+def _rollback_unavailable_reason(session) -> str | None:
+    checkpoint_manager = _tools_mod("tools.checkpoint_manager")
+    task_id = session.get("session_key", "") or "default"
+    tokens = _set_session_context(task_id, cwd=_session_cwd(session))
+    try:
+        with _session_profile_runtime_scope(session):
+            return checkpoint_manager.checkpoint_unavailable_reason(task_id)
+    finally:
+        _clear_session_context(tokens)
+
+
 @_scoped_rpc("insights.get", 5017)
 def _(rid, params: dict) -> dict:
     days = params.get("days", 30)
@@ -929,6 +940,8 @@ def _(rid, params: dict) -> dict:
 
 @_rpc("rollback.list", live_session=True, fail_code=5020)
 def _(rid, params: dict, session) -> dict:
+    if reason := _rollback_unavailable_reason(session):
+        return _ok(rid, {"enabled": False, "checkpoints": [], "unavailable_reason": reason})
     def go(mgr, cwd):
         if not mgr.enabled:
             return _ok(rid, {"enabled": False, "checkpoints": []})
@@ -943,6 +956,8 @@ def _(rid, params: dict, session) -> dict:
     target, file_path = params.get("hash", ""), params.get("file_path", "")
     if not target:
         return _err(rid, 4014, "hash required")
+    if reason := _rollback_unavailable_reason(session):
+        return _ok(rid, {"success": False, "error": reason})
     # Full-history rollback mutates session history → rejected mid-turn (prompt.submit
     # would drop the agent's output or clobber it). File-scoped only touches disk.
     if not file_path and session.get("running"):
@@ -968,6 +983,8 @@ def _(rid, params: dict, session) -> dict:
 def _(rid, params: dict, session) -> dict:
     if not (target := params.get("hash", "")):
         return _err(rid, 4014, "hash required")
+    if reason := _rollback_unavailable_reason(session):
+        return _ok(rid, {"stat": "", "diff": "", "error": reason})
     r = _with_checkpoints(session, lambda mgr, cwd: mgr.diff(cwd, _resolve_checkpoint_hash(mgr, cwd, target)))
     raw = r.get("diff", "")[:4000]
     payload = {"stat": r.get("stat", ""), "diff": raw}
