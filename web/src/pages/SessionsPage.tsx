@@ -33,7 +33,9 @@ import {
   Archive,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { asArray, asCount, asCountMap } from "@/lib/api-guards";
 import { formatSessionPruneResult } from "@/lib/session-prune";
+import { sourceLabel as sessionSourceLabel } from "@/lib/session-source-label";
 import { shouldRefreshSessions } from "@/lib/session-refresh";
 import {
   importSummary,
@@ -126,46 +128,7 @@ function sourceBelongsToCategory(
   return !isAutomationSource(source);
 }
 
-function sourceLabel(source: string): string {
-  switch (source) {
-    case "api_server":
-      return "API server";
-    case "acp":
-      return "ACP";
-    case "cli":
-      return "CLI";
-    case "tui":
-      return "TUI";
-    case "telegram":
-      return "Telegram";
-    case "discord":
-      return "Discord";
-    case "slack":
-      return "Slack";
-    case "whatsapp":
-      return "WhatsApp";
-    case "whatsapp_cloud":
-      return "WhatsApp Cloud";
-    case "sms":
-      return "SMS";
-    case "cron":
-      return "Cron";
-    case "tool":
-      return "Tool";
-    case "hermes_flow":
-      return "Hermes Flow";
-    case "vulcan_delegate":
-      return "Vulcan delegate";
-    case "webhook":
-      return "Webhook";
-    default:
-      return source
-        .split("_")
-        .filter(Boolean)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
-  }
-}
+const sourceLabel = sessionSourceLabel;
 
 /** Render an FTS5 snippet with highlighted matches.
  *  The backend wraps matches in >>> and <<< delimiters. */
@@ -220,9 +183,9 @@ function ToolCallBlock({
         className="px-3 py-2 text-xs text-warning hover:bg-warning/10 hover:text-warning"
       >
         {open ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="h-3 w-3 rtl:-scale-x-100 ltr:scale-x-100" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="h-3 w-3 rtl:-scale-x-100 ltr:scale-x-100" />
         )}
         <span className="font-mono-ui font-medium">
           {toolCall.function.name}
@@ -331,7 +294,7 @@ function MessageBubble({
     compaction: {
       bg: "bg-muted/50",
       text: "text-muted-foreground italic",
-      label: "Context handoff",
+      label: t.app.nav.contextHandoff ?? "Context handoff",
     },
   };
 
@@ -454,7 +417,7 @@ function MessageList({
   return (
     <div
       ref={containerRef}
-      className="flex flex-col gap-3 max-h-[600px] overflow-y-auto pr-2"
+      className="flex flex-col gap-3 max-h-[600px] overflow-y-auto pe-2"
     >
       {messages.map((msg, i) => (
         <MessageBubble key={i} msg={msg} highlight={highlight} />
@@ -490,7 +453,7 @@ function SessionRow({
     api
       .getSessionMessages(session.id, session.profile)
       .then((resp) => {
-        if (!cancelled) setMessages(resp.messages);
+        if (!cancelled) setMessages(asArray<SessionMessage>(resp.messages));
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err));
@@ -525,8 +488,8 @@ function SessionRow({
   const actionButtons = (
     <>
       <Badge tone="outline" className="text-xs">
-        <SourceIcon className={`mr-1 h-3 w-3 ${sourceInfo.color}`} />
-        {session.source ? sourceLabel(session.source) : "local"}
+        <SourceIcon className={`me-1 h-3 w-3 ${sourceInfo.color}`} />
+        {session.source ? sourceLabel(t, session.source) : t.sessions.sources?.local ?? "local"}
       </Badge>
 
       {resumeInChatEnabled && (
@@ -549,8 +512,8 @@ function SessionRow({
         ghost
         size="icon"
         className="text-muted-foreground hover:text-foreground"
-        aria-label="Rename session"
-        title="Rename session"
+        aria-label={t.sessions.renameSession}
+        title={t.sessions.renameSession}
         onClick={(e) => {
           e.stopPropagation();
           setRenameValue(
@@ -568,8 +531,8 @@ function SessionRow({
         ghost
         size="icon"
         className="text-muted-foreground hover:text-foreground"
-        aria-label="Export session"
-        title="Export session JSON"
+        aria-label={t.sessions.exportSession}
+        title={t.sessions.exportSessionTooltip}
         onClick={(e) => {
           e.stopPropagation();
           onExport(session.id);
@@ -651,16 +614,15 @@ function SessionRow({
                         if (e.key === "Enter") void submitRename();
                         else if (e.key === "Escape") setRenaming(false);
                       }}
-                      placeholder="Session title"
+                      placeholder={t.sessions.sessionTitlePlaceholder}
                       className="h-7 min-w-0 flex-1 py-0 text-sm"
                       disabled={renameSaving}
                     />
                     <Button
                       ghost
                       size="icon"
-                      className="text-muted-foreground hover:text-success"
-                      aria-label="Save title"
-                      title="Save title"
+                      className="text-muted-foreground hover:text-success"aria-label={t.sessions.saveTitle}
+        title={t.sessions.saveTitle}
                       disabled={renameSaving}
                       onClick={() => void submitRename()}
                     >
@@ -673,9 +635,8 @@ function SessionRow({
                     <Button
                       ghost
                       size="icon"
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label="Cancel rename"
-                      title="Cancel rename"
+                      className="text-muted-foreground hover:text-foreground"aria-label={t.sessions.cancelRename}
+        title={t.sessions.cancelRename}
                       disabled={renameSaving}
                       onClick={() => setRenaming(false)}
                     >
@@ -695,7 +656,7 @@ function SessionRow({
                 )}
                 {session.is_active && (
                   <Badge tone="success" className="shrink-0 text-xs">
-                    <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                    <span className="me-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
                     {t.common.live}
                   </Badge>
                 )}
@@ -794,7 +755,9 @@ function SessionsPagination({
           onClick={() => onPageChange(page - 1)}
           aria-label={t.sessions.previousPage}
         >
-          <ChevronLeft />
+          {/* Flow direction is semantic: arrows mirror with the document so
+              "previous" points the way previous pages actually sit in RTL. */}
+          <ChevronLeft className="rtl:-scale-x-100 ltr:scale-x-100" />
         </Button>
         <span className="px-2 text-xs text-muted-foreground">
           {t.common.page} {page + 1} {t.common.of} {pageCount}
@@ -806,7 +769,7 @@ function SessionsPagination({
           onClick={() => onPageChange(page + 1)}
           aria-label={t.sessions.nextPage}
         >
-          <ChevronRight />
+          <ChevronRight className="rtl:-scale-x-100 ltr:scale-x-100" />
         </Button>
       </div>
     </div>
@@ -888,7 +851,7 @@ export default function SessionsPage() {
   const allSourceOptions = useMemo(() => {
     const entries = Object.entries(stats?.by_source ?? {}).sort(
       ([aSource, aCount], [bSource, bCount]) =>
-        bCount - aCount || sourceLabel(aSource).localeCompare(sourceLabel(bSource)),
+        bCount - aCount || sourceLabel(t, aSource).localeCompare(sourceLabel(t, bSource)),
     );
     const seen = new Set(entries.map(([source]) => source));
     for (const source of pinnedSourceSelections) {
@@ -898,7 +861,7 @@ export default function SessionsPage() {
       }
     }
     return entries;
-  }, [pinnedSourceSelections, stats]);
+  }, [pinnedSourceSelections, stats, t]);
 
   const allSourceNames = useMemo(
     () => allSourceOptions.map(([source]) => source),
@@ -957,29 +920,34 @@ export default function SessionsPage() {
   );
 
   const defaultSourceFilterLabel = useMemo(() => {
-    if (sessionCategory === "chats") return "Any chat source";
-    if (sessionCategory === "automation") return "Any automation source";
+    if (sessionCategory === "chats") return t.app.nav.anyChatSource ?? "Any chat source";
+    if (sessionCategory === "automation")
+      return t.app.nav.anyAutomationSource ?? "Any automation source";
     return t.sessions.anySource;
-  }, [sessionCategory, t.sessions.anySource]);
+  }, [sessionCategory, t.sessions.anySource, t.app.nav]);
 
   const sourceMenuTitle = useMemo(() => {
-    if (sessionCategory === "chats") return "Chat sources";
-    if (sessionCategory === "automation") return "Automation sources";
+    if (sessionCategory === "chats") return t.app.nav.chatSources ?? "Chat sources";
+    if (sessionCategory === "automation")
+      return t.app.nav.automationSources ?? "Automation sources";
     return t.sessions.sourceFilter;
-  }, [sessionCategory, t.sessions.sourceFilter]);
+  }, [sessionCategory, t.sessions.sourceFilter, t.app.nav]);
 
   const sourceFilterLabel = useMemo(() => {
     if (selectedSources === null) {
       return defaultSourceFilterLabel;
     }
     if (selectedSources.length === 0) {
-      return "No sources";
+      return t.app.nav.noSources ?? "No sources";
     }
     if (selectedSources.length === 1) {
-      return sourceLabel(selectedSources[0]);
+      return sourceLabel(t, selectedSources[0]);
     }
-    return `${selectedSources.length} sources`;
-  }, [defaultSourceFilterLabel, selectedSources]);
+    return (t.app.nav.nSources ?? "{count} sources").replace(
+      "{count}",
+      String(selectedSources.length),
+    );
+  }, [defaultSourceFilterLabel, selectedSources, t]);
 
   const refreshEmptyCount = useCallback(() => {
     api
@@ -1016,13 +984,13 @@ export default function SessionsPage() {
         onClick={() => setPruneOpen(true)}
         prefix={<Archive />}
       >
-        Prune old sessions
+        {t.app.nav.pruneOldSessions ?? "Prune old sessions"}
       </Button>,
     );
     return () => {
       setEnd(null);
     };
-  }, [setEnd]);
+  }, [setEnd, t]);
 
   useEffect(() => {
     if (!sourceMenuOpen) return;
@@ -1053,8 +1021,8 @@ export default function SessionsPage() {
       .getSessions(PAGE_SIZE, p * PAGE_SIZE, sessionQueryOptions)
       .then((resp) => {
         if (requestId !== sessionsRequestRef.current) return;
-        setSessions(resp.sessions);
-        setTotal(resp.total);
+        setSessions(asArray<SessionInfo>(resp.sessions));
+        setTotal(asCount(resp.total));
       })
       .catch(() => {})
       .finally(() => {
@@ -1066,7 +1034,17 @@ export default function SessionsPage() {
   const loadStats = useCallback(() => {
     api
       .getSessionStats()
-      .then(setStats)
+      .then((resp) =>
+        // Coerce at the boundary: render code reads every field directly,
+        // and a mis-shaped payload must degrade to zeroed counts, not throw.
+        setStats({
+          total: asCount(resp.total),
+          active_store: asCount(resp.active_store),
+          archived: asCount(resp.archived),
+          messages: asCount(resp.messages),
+          by_source: asCountMap(resp.by_source),
+        }),
+      )
       .catch(() => {});
   }, []);
 
@@ -1079,13 +1057,25 @@ export default function SessionsPage() {
         const text = await file.text();
         const importedSessions = parseImportSessions(text);
         const result = await api.importSessions(importedSessions);
-        showToast(`Import complete: ${importSummary(result)}`, "success");
+        showToast(
+        (t.sessions.importComplete ?? "Import complete: {summary}").replace(
+          "{summary}",
+          importSummary(result),
+        ),
+        "success",
+      );
         clearSelection();
         loadSessions(page, true);
         loadStats();
         refreshEmptyCount();
       } catch (error) {
-        showToast(`Import failed: ${errorMessage(error)}`, "error");
+        showToast(
+          (t.sessions.importFailed ?? "Import failed: {error}").replace(
+            "{error}",
+            errorMessage(error),
+          ),
+          "error",
+        );
       } finally {
         setImportingSessions(false);
         if (importInputRef.current) importInputRef.current.value = "";
@@ -1098,6 +1088,7 @@ export default function SessionsPage() {
       page,
       refreshEmptyCount,
       showToast,
+      t,
     ],
   );
 
@@ -1142,7 +1133,8 @@ export default function SessionsPage() {
         .getSessions(50, 0, sessionQueryOptions)
         .then((r) => {
           if (cancelled) return;
-          setOverviewSessions(r.sessions);
+          const overview = asArray<SessionInfo>(r.sessions);
+          setOverviewSessions(overview);
           // The dashboard server and a terminal CLI are separate
           // processes sharing one session DB — there is no push channel,
           // so we detect sessions created in another process here. The
@@ -1150,7 +1142,7 @@ export default function SessionsPage() {
           // reuse its head id as a cheap change signal: when it changes,
           // silently refresh the paginated list so the new session shows
           // up in real time without a visible loading flicker.
-          const newest = r.sessions[0]?.id ?? null;
+          const newest = overview[0]?.id ?? null;
           if (shouldRefreshSessions(newestSeenRef.current, newest)) {
             loadSessions(pageRef.current, true);
           }
@@ -1265,7 +1257,7 @@ export default function SessionsPage() {
       setSearchResults(null);
       api
         .searchSessions(search.trim(), sessionQueryOptions)
-        .then((resp) => setSearchResults(resp.results))
+        .then((resp) => setSearchResults(asArray<SessionSearchResult>(resp.results)))
         .catch(() => setSearchResults(null))
         .finally(() => setSearching(false));
     }, 300);
@@ -1507,16 +1499,19 @@ export default function SessionsPage() {
         a.click();
         URL.revokeObjectURL(url);
       } catch {
-        showToast("Failed to export session", "error");
+      showToast(t.sessions.failedToExport ?? "Failed to export session", "error");
       }
     },
-    [rowProfile, showToast],
+    [showToast, t.sessions.failedToExport],
   );
 
   const handlePrune = useCallback(async () => {
     const days = parseInt(pruneDays, 10);
     if (!Number.isFinite(days) || days < 0) {
-      showToast("Enter a valid number of days", "error");
+      showToast(
+        t.sessions.invalidPruneDays ?? "Enter a valid number of days",
+        "error",
+      );
       return;
     }
     setPruning(true);
@@ -1528,11 +1523,11 @@ export default function SessionsPage() {
       setPage(0);
       loadStats();
     } catch {
-      showToast("Failed to prune sessions", "error");
+      showToast(t.sessions.failedToPrune ?? "Failed to prune sessions", "error");
     } finally {
       setPruning(false);
     }
-  }, [pruneDays, showToast, loadSessions, loadStats]);
+  }, [pruneDays, showToast, loadSessions, loadStats, t]);
 
   const pendingSession = sessionDelete.pendingId
     ? sessions.find((s) => s.id === sessionDelete.pendingId)
@@ -1653,10 +1648,12 @@ export default function SessionsPage() {
       >
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Prune old sessions</DialogTitle>
+            <DialogTitle>
+              {t.app.nav.pruneOldSessions ?? "Prune old sessions"}
+            </DialogTitle>
             <DialogDescription>
-              Permanently remove archived sessions whose last activity is older
-              than the given number of days. Active sessions are never pruned.
+              {t.app.nav.pruneOldSessionsDescription ??
+                "Permanently remove archived sessions whose last activity is older than the given number of days. Active sessions are never pruned."}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1.5">
@@ -1664,7 +1661,7 @@ export default function SessionsPage() {
               htmlFor="prune-days"
               className="text-xs font-medium text-muted-foreground"
             >
-              Older than (days)
+              {t.app.nav.olderThanDays ?? "Older than (days)"}
             </label>
             <Input
               id="prune-days"
@@ -1693,7 +1690,7 @@ export default function SessionsPage() {
               className="gap-1.5"
             >
               {pruning && <Spinner className="text-sm" />}
-              Prune
+              {t.app.nav.prune ?? "Prune"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1857,7 +1854,7 @@ export default function SessionsPage() {
 
               {sourceMenuOpen && (
                 <div
-                  className="absolute left-0 top-full z-30 mt-1 w-[18rem] max-w-[calc(100vw-2rem)] border border-border bg-background-base shadow-lg"
+                  className="absolute start-0 top-full z-30 mt-1 w-[18rem] max-w-[calc(100vw-2rem)] border border-border bg-background-base shadow-lg"
                 >
                   <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
                     <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -1896,17 +1893,16 @@ export default function SessionsPage() {
                               onClick={(event) => {
                                 event.stopPropagation();
                                 toggleSourceFilter(source);
-                              }}
-                              aria-label={`${t.sessions.sourceFilter}: ${sourceLabel(source)}`}
+                              }}                                aria-label={`${t.sessions.sourceFilter}: ${sourceLabel(t, source)}`}
                             />
                             <button
                               type="button"
-                              className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs"
+                              className="flex min-w-0 flex-1 items-center gap-2 text-start text-xs"
                               onClick={() => toggleSourceFilter(source)}
                             >
                               <SourceIcon className={`h-3.5 w-3.5 shrink-0 ${sourceColor}`} />
                               <span className="min-w-0 flex-1 truncate">
-                                {sourceLabel(source)}
+                                {sourceLabel(t, source)}
                               </span>
                               <span className="shrink-0 tabular-nums text-muted-foreground">
                                 {count}
@@ -1937,21 +1933,21 @@ export default function SessionsPage() {
             {showList && (
               <div className="relative min-w-0 w-full sm:w-auto sm:min-w-[12rem] sm:max-w-md sm:flex-1">
                 {searching ? (
-                  <Spinner className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[0.875rem] text-primary" />
+                  <Spinner className="absolute start-2.5 top-1/2 -translate-y-1/2 text-[0.875rem] text-primary" />
                 ) : (
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <Search className="absolute start-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                 )}
                 <Input
                   placeholder={t.sessions.searchPlaceholder}
                   value={search}
                   onChange={(e) => updateSearch(e.target.value)}
-                  className="h-8 py-0 pr-7 pl-8 text-xs leading-none"
+                  className="h-8 py-0 pe-7 ps-8 text-xs leading-none"
                 />
                 {search && (
                   <Button
                     ghost
                     size="xs"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    className="absolute end-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                     onClick={() => updateSearch("")}
                     aria-label={t.common.clear}
                   >
@@ -1985,12 +1981,12 @@ export default function SessionsPage() {
                 className="shrink-0"
                 disabled={importingSessions}
                 onClick={() => importInputRef.current?.click()}
-                aria-label="Import exported sessions"
-                title="Import exported session JSON or JSONL"
+                aria-label={t.app.nav.importSessions ?? "Import sessions"}
+                title={t.app.nav.importSessionsTitle ?? "Import exported session JSON or JSONL"}
                 prefix={importingSessions ? <Spinner /> : <Upload />}
               >
                 <span className="font-mondwest normal-case text-xs">
-                  Import sessions
+                  {t.app.nav.importSessions ?? "Import sessions"}
                 </span>
               </Button>
             )}
@@ -2181,8 +2177,8 @@ export default function SessionsPage() {
                       tone="outline"
                       className="shrink-0 self-start text-xs sm:self-center"
                     >
-                      <Database className="mr-1 h-3 w-3" />
-                      {s.source ? sourceLabel(s.source) : "local"}
+                      <Database className="me-1 h-3 w-3" />
+                      {s.source ? sourceLabel(t, s.source) : t.sessions.sources?.local ?? "local"}
                     </Badge>
                   </div>
                 ))}

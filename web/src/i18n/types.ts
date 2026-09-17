@@ -15,7 +15,8 @@ export type Locale =
   | "pt"
   | "ru"
   | "hu"
-  | "ar";
+  | "ar"
+  | "fa";
 
 export interface Translations {
   // ── Common ──
@@ -103,6 +104,27 @@ export interface Translations {
       plugins: string;
       sessions: string;
       skills: string;
+      /** Optional — fall back to the English literal until translated. */
+      files?: string;
+      mcp?: string;
+      channels?: string;
+      webhooks?: string;
+      pairing?: string;
+      system?: string;
+      /** Sessions-page toolbar — optional, English fallback. */
+      pruneOldSessions?: string;
+      pruneOldSessionsDescription?: string;
+      olderThanDays?: string;
+      prune?: string;
+      importSessions?: string;
+      importSessionsTitle?: string;
+      anyChatSource?: string;
+      anyAutomationSource?: string;
+      chatSources?: string;
+      automationSources?: string;
+      noSources?: string;
+      nSources?: string;
+      contextHandoff?: string;
     };
     modelToolsSheetSubtitle: string;
     modelToolsSheetTitle: string;
@@ -171,6 +193,13 @@ export interface Translations {
   // ── Sessions page ──
   sessions: {
     title: string;
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    renameSession?: string;
+    exportSession?: string;
+    exportSessionTooltip?: string;
+    sessionTitlePlaceholder?: string;
+    saveTitle?: string;
+    cancelRename?: string;
     history: string;
     overview: string;
     filterChats: string;
@@ -183,6 +212,18 @@ export interface Translations {
     noSessionsInFilter: string;
     noMatch: string;
     startConversation: string;
+    /** Optional — fall back to the English literal until translated. */
+    failedToExport?: string;
+    invalidPruneDays?: string;
+    failedToPrune?: string;
+    importComplete?: string;
+    importFailed?: string;
+    imported?: string;
+    skipped?: string;
+    detachedFromMissingParents?: string;
+    pruneResult?: string;
+    prunedArchived?: string;
+    prunedActiveSkipped?: string;
     noMessages: string;
     untitledSession: string;
     deleteSession: string;
@@ -195,6 +236,29 @@ export interface Translations {
     deleteEmptyConfirmMessage: string;
     emptySessionsDeleted: string;
     failedToDeleteEmpty: string;
+    /** Sessions-page source names — optional, English fallback. */
+    sources?: {
+      api_server?: string;
+      acp?: string;
+      cli?: string;
+      tui?: string;
+      telegram?: string;
+      discord?: string;
+      slack?: string;
+      whatsapp?: string;
+      whatsapp_cloud?: string;
+      sms?: string;
+      cron?: string;
+      tool?: string;
+      hermes_flow?: string;
+      vulcan_delegate?: string;
+      webhook?: string;
+      local?: string;
+      email?: string;
+      matrix?: string;
+      signal?: string;
+      browser?: string;
+    };
     selectSession: string;
     selectAllOnPage: string;
     clearSelection: string;
@@ -246,6 +310,11 @@ export interface Translations {
   // ── Models page ──
   models: {
     modelsUsed: string;
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    expensiveWarningTitle?: string;
+    resetAuxiliaryModels?: string;
+    newPresetNamePlaceholder?: string;
+    selectMoaModel?: string;
     estimatedCost: string;
     tokens: string;
     sessions: string;
@@ -254,6 +323,9 @@ export interface Translations {
     toolCalls: string;
     noModelsData: string;
     startSession: string;
+    change?: string;
+    configure?: string;
+    setMainModel?: string;
   };
 
   // ── Logs page ──
@@ -272,6 +344,9 @@ export interface Translations {
     /** Optional — English fallback until translated. */
     loadWhat?: string;
     scriptRequired?: string;
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    jobIdsPlaceholder?: string;
+    editJob?: string;
     confirmDeleteMessage: string;
     confirmDeleteTitle: string;
     newJob: string;
@@ -458,10 +533,13 @@ export interface Translations {
   // ── Skills page ──
   skills: {
     title: string;
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    editSkillMd?: string;
+    learnUrlPlaceholder?: string;
+    learnTextPlaceholder?: string;
     searchPlaceholder: string;
     /** Optional — English fallback until translated. */
     loadWhat?: string;
-    browseHub?: string;
     createSkill?: string;
     enabledOf: string;
     all: string;
@@ -482,6 +560,9 @@ export interface Translations {
     profileSelector?: string;
     currentProfile?: string;
     managingProfile?: string;
+    browseHub?: string;
+    learnASkill?: string;
+    newSkill?: string;
   };
 
   // ── Config page ──
@@ -527,6 +608,8 @@ export interface Translations {
 
   // ── Env / Keys page ──
   env: {
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    jumpToSection?: string;
     changesNote: string;
     confirmClearMessage: string;
     confirmClearTitle: string;
@@ -614,6 +697,10 @@ export interface Translations {
     fontSans?: string;
     fontSerif?: string;
     fontMono?: string;
+    /** Localized theme labels — optional, keyed by theme name. Locales that
+     *  don't translate these fall back to the API-provided English label. */
+    themeNames?: Record<string, string>;
+    themeDescriptions?: Record<string, string>;
   };
 
   // ── Achievements plugin (plugins/hermes-achievements) ──
@@ -711,6 +798,19 @@ export interface Translations {
       clipboard_unsupported: string;
       tweet_text: string;
     };
+  };
+
+  // ── Chat page chrome ──
+  chat?: {
+    /** Optional until all locales translate; deep-merge falls back to English. */
+    reconnect?: string;
+    newSession?: string;
+    copyLastTooltip?: string;
+    copyLast?: string;
+    showSidePanel?: string;
+    showSidePanelTitle?: string;
+    collapseSidePanel?: string;
+    collapseSidePanelTitle?: string;
   };
 
   // ── Kanban ──

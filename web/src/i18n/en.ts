@@ -84,6 +84,26 @@ export const en: Translations = {
       plugins: "Plugins",
       sessions: "Sessions",
       skills: "Skills",
+      files: "Files",
+      mcp: "MCP",
+      channels: "Channels",
+      webhooks: "Webhooks",
+      pairing: "Pairing",
+      system: "System",
+      pruneOldSessions: "Prune old sessions",
+      pruneOldSessionsDescription:
+        "Permanently remove archived sessions whose last activity is older than the given number of days. Active sessions are never pruned.",
+      olderThanDays: "Older than (days)",
+      prune: "Prune",
+      importSessions: "Import sessions",
+      importSessionsTitle: "Import exported session JSON or JSONL",
+      anyChatSource: "Any chat source",
+      anyAutomationSource: "Any automation source",
+      chatSources: "Chat sources",
+      automationSources: "Automation sources",
+      noSources: "No sources",
+      nSources: "{count} sources",
+      contextHandoff: "Context handoff",
     },
     modelToolsSheetSubtitle: "& tools",
     modelToolsSheetTitle: "Model",
@@ -154,6 +174,12 @@ export const en: Translations = {
 
   sessions: {
     title: "Sessions",
+    renameSession: "Rename session",
+    exportSession: "Export session",
+    exportSessionTooltip: "Export session JSON",
+    sessionTitlePlaceholder: "Session title",
+    saveTitle: "Save title",
+    cancelRename: "Cancel rename",
     history: "History",
     overview: "Overview",
     filterChats: "Chats",
@@ -180,6 +206,14 @@ export const en: Translations = {
       "This permanently removes {count} sessions that have no messages. Active and archived sessions are skipped. This cannot be undone.",
     emptySessionsDeleted: "{count} empty sessions deleted",
     failedToDeleteEmpty: "Failed to delete empty sessions",
+    failedToExport: "Failed to export session",
+    invalidPruneDays: "Enter a valid number of days",
+    failedToPrune: "Failed to prune sessions",
+    importComplete: "Import complete: {summary}",
+    importFailed: "Import failed: {error}",
+    imported: "{count} imported",
+    skipped: "{count} skipped",
+    detachedFromMissingParents: "{count} detached from missing parents",
     selectSession: "Select session",
     selectAllOnPage: "Select all on this page",
     clearSelection: "Clear selection",
@@ -192,6 +226,28 @@ export const en: Translations = {
     failedToDeleteSelected: "Failed to delete selected sessions",
     resumeInChat: "Resume in Chat",
     newChat: "New chat",
+    sources: {
+      api_server: "API server",
+      acp: "ACP",
+      cli: "CLI",
+      tui: "TUI",
+      telegram: "Telegram",
+      discord: "Discord",
+      slack: "Slack",
+      whatsapp: "WhatsApp",
+      whatsapp_cloud: "WhatsApp Cloud",
+      sms: "SMS",
+      cron: "Cron",
+      tool: "Tool",
+      hermes_flow: "Hermes Flow",
+      vulcan_delegate: "Vulcan delegate",
+      webhook: "Webhook",
+      local: "Local",
+      email: "Email",
+      matrix: "Matrix",
+      signal: "Signal",
+      browser: "Browser",
+    },
     previousPage: "Previous page",
     nextPage: "Next page",
     roles: {
@@ -230,6 +286,10 @@ export const en: Translations = {
 
   models: {
     modelsUsed: "Models Used",
+    expensiveWarningTitle: "Expensive Model Warning",
+    resetAuxiliaryModels: "Reset auxiliary models",
+    newPresetNamePlaceholder: "new preset name",
+    selectMoaModel: "Select MoA Model",
     estimatedCost: "Est. Cost",
     tokens: "tokens",
     sessions: "sessions",
@@ -238,6 +298,9 @@ export const en: Translations = {
     toolCalls: "tool calls",
     noModelsData: "No model usage data for this period",
     startSession: "Start a session to see model data here",
+    change: "Change",
+    configure: "Configure",
+    setMainModel: "Set Main Model",
   },
 
   logs: {
@@ -256,6 +319,8 @@ export const en: Translations = {
     // user has seen; name the field they must fill instead.
     scriptRequired:
       "Script-only jobs need a script path. Fill in the Script field or switch the job back to prompt mode.",
+    jobIdsPlaceholder: "one job id per line",
+    editJob: "Edit job",
     confirmDeleteMessage:
       "This removes the job from the schedule. This cannot be undone.",
     confirmDeleteTitle: "Delete scheduled job?",
@@ -444,10 +509,12 @@ export const en: Translations = {
 
   skills: {
     title: "Skills",
+    editSkillMd: "Edit SKILL.md",
+    learnUrlPlaceholder: "https://docs.example.com/api  (fetched with web_extract)",
+    learnTextPlaceholder: "e.g. how I file an expense report: open the portal, …",
     searchPlaceholder: "Search skills and toolsets...",
     loadWhat: "skills",
     browseHub: "Browse skills hub",
-    createSkill: "Create skill",
     enabledOf: "{enabled}/{total} enabled",
     all: "All",
     categories: "Categories",
@@ -467,6 +534,8 @@ export const en: Translations = {
     currentProfile: "current ({name})",
     managingProfile:
       "Managing profile \u201c{name}\u201d — toggles apply to that profile, not this dashboard\u2019s.",
+    learnASkill: "Learn a skill",
+    newSkill: "New skill",
   },
 
   config: {
@@ -510,6 +579,7 @@ export const en: Translations = {
   },
 
   env: {
+    jumpToSection: "Jump to section",
     changesNote: "Changes are saved to disk immediately. Active sessions pick up new keys automatically.",
     confirmClearMessage:
       "The stored value for this variable will be removed from your .env file. This cannot be undone from the UI.",
@@ -596,6 +666,28 @@ export const en: Translations = {
     fontSans: "Sans",
     fontSerif: "Serif",
     fontMono: "Mono",
+    themeNames: {
+      default: "Hermes Fish",
+      "default-large": "Hermes Fish (Large)",
+      "nous-blue": "Nous Blue",
+      midnight: "Midnight",
+      ember: "Ember",
+      mono: "Mono",
+      cyberpunk: "Cyberpunk",
+      rose: "Rose Gold",
+      persian: "Persian Tiles",
+    },
+    themeDescriptions: {
+      default: "Classic dark teal — the original Hermes look",
+      "default-large": "Hermes Fish with a larger font and more spacing",
+      "nous-blue": "Light mode — bold Nous blue on a warm ivory canvas",
+      midnight: "Deep blue-violet with cool accents",
+      ember: "Warm crimson and bronze — a forge-like feel",
+      mono: "Monochrome grays — minimal and focused",
+      cyberpunk: "Neon green on black — matrix terminal",
+      rose: "Soft pink on warm ivory — easy on the eyes",
+      persian: "Lapis night with turquoise tiles and golden saffron accents",
+    },
   },
 
   achievements: {
@@ -703,6 +795,17 @@ export const en: Translations = {
         "Clipboard image copy not supported in this browser — use Download instead.",
       tweet_text: "Just unlocked {tier_part}\"{name}\" in Hermes Agent ☤",
     },
+  },
+
+  chat: {
+    reconnect: "Reconnect chat",
+    newSession: "Start a new chat session",
+    copyLastTooltip: "Copy last assistant response as raw markdown",
+    copyLast: "Copy last assistant response",
+    showSidePanel: "Show chat side panel",
+    showSidePanelTitle: "Show side panel (model + sessions)",
+    collapseSidePanel: "Collapse chat side panel",
+    collapseSidePanelTitle: "Collapse side panel",
   },
 
   kanban: {
