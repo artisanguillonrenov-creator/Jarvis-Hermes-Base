@@ -2499,6 +2499,37 @@ class TestStaleBaseUrlWarning:
 
 
 class TestAuxiliaryTaskExtraBody:
+    def test_custom_endpoint_omits_disabled_reasoning_wire_field(self):
+        """Arbitrary OpenAI-compatible endpoints may reject reasoning_effort."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": "hello"}],
+            reasoning_config={"enabled": False},
+            base_url="https://relay.example/v1",
+            task="title_generation",
+        )
+
+        assert "reasoning_effort" not in kwargs
+
+    def test_ollama_endpoint_keeps_disabled_reasoning_wire_fields(self):
+        """Ollama's /v1 route requires the established explicit disable encoding."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="qwen3",
+            messages=[{"role": "user", "content": "hello"}],
+            reasoning_config={"enabled": False},
+            base_url="http://localhost:11434/v1",
+            task="title_generation",
+        )
+
+        assert kwargs["reasoning_effort"] == "none"
+        assert kwargs["extra_body"]["think"] is False
+
     @pytest.mark.parametrize("task", ["session_search", "moa_reference", "moa_aggregator"])
     def test_generic_reasoning_fallback_clamps_ultra_for_auxiliary_and_moa_calls(self, task, monkeypatch):
         """The OpenAI-compatible fallback must never put Hermes-only ``ultra`` on the wire."""

@@ -36,18 +36,19 @@ class CustomProfile(ProviderProfile):
         top_level: dict[str, Any] = {}
         if ollama_num_ctx:
             extra_body["options"] = {"num_ctx": ollama_num_ctx}
-        # disabled -> top-level reasoning_effort="none" (Ollama's /v1 ignores
-        # extra_body.think) plus think=False only on Ollama URLs; enabled+effort ->
-        # top-level reasoning_effort clamped to the OpenAI-compat wire (GLM/ARK,
-        # vLLM and SGLang all top out at "max"; "ultra" verbatim 400s); enabled
-        # without effort -> omit so the server default applies. Never emit
-        # think=True (Ollama-only flag).
+        # Disabled reasoning has an explicit wire form only for an identified
+        # Ollama endpoint: its /v1 API ignores extra_body.think. Arbitrary
+        # OpenAI-compatible custom endpoints do not share that capability and
+        # can reject reasoning_effort entirely, so omit reasoning fields there.
+        # Enabled+effort still uses the OpenAI-compat wire (GLM/ARK, vLLM and
+        # SGLang all top out at "max"; "ultra" verbatim 400s); enabled without
+        # effort omits it so the server default applies. Never emit think=True.
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
-                # See #14820.
-                top_level["reasoning_effort"] = "none"
                 if _looks_like_ollama_endpoint(ctx.get("base_url")):
+                    # See #14820.
+                    top_level["reasoning_effort"] = "none"
                     extra_body["think"] = False
             elif effort:
                 top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
