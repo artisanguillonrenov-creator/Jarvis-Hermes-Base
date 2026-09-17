@@ -167,6 +167,15 @@ def test_waiter_outlives_the_desktop_deliver_deadline():
     assert bot_relay.REPLY_WAIT_SECONDS > desktop_budget_s
 
 
+def test_configured_lock_wait_rebuilds_the_desktop_budget():
+    assert bot_relay.desktop_deliver_timeout_seconds(600) == 600 + 2 * 600 + 180
+
+
+def test_configured_lock_wait_extends_the_waiter_linger(monkeypatch):
+    monkeypatch.setattr(bot_relay, "turn_wait_seconds", lambda: 600.0)
+    assert bot_relay.relay_waiter_linger_seconds() == 600 + 2 * 600 + 180 + 60
+
+
 def test_waiter_give_up_message_states_the_real_budget(root):
     import shlex
 
@@ -331,15 +340,17 @@ def test_relay_route_queues_envelope_and_spawns_waiter(tmp_path, monkeypatch):
 
     spawned = {}
 
-    def _fake_spawn(command, label, *, task_id, agent):
+    def _fake_spawn(command, label, *, task_id, agent, completion_linger_seconds=None):
         spawned["command"] = command
         spawned["label"] = label
+        spawned["completion_linger_seconds"] = completion_linger_seconds
         return json.dumps({"status": "sent", "to": label})
 
     monkeypatch.setattr("tools.bot_mode_dm._spawn_delivery", _fake_spawn)
     agent = _FakeAgent(home)
     out = json.loads(message_agent_tool(target="hermes", message="ping", agent=agent))
     assert out.get("status") == "sent"
+    assert spawned["completion_linger_seconds"] == bot_relay.relay_waiter_linger_seconds()
     assert "Hermes Cloud" in spawned["label"]
     # envelope landed in the outbox with attribution prefixed
     pending = bot_relay.claim_pending_envelopes(home)

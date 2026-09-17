@@ -64,7 +64,7 @@ describe('bot_relay.deliver budget mirrors', () => {
       relaySource.indexOf('export function startBotRelay')
     )
 
-    expect(drain).toMatch(/'bot_relay\.deliver'[\s\S]{0,400}RELAY_DELIVER_TIMEOUT_MS/)
+    expect(drain).toMatch(/'bot_relay\.deliver'[\s\S]{0,400}relayDeliverTimeoutMs\(budget\)/)
     expect(drain).not.toMatch(/'bot_relay\.deliver'[\s\S]{0,400}\d{6,}/)
   })
 })

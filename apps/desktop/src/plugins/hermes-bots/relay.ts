@@ -134,6 +134,16 @@ interface RelayEnvelope {
   target_profile?: string
 }
 
+function relayDeliverTimeoutMs(budget: unknown): number {
+  const configuredWaitSeconds = Number((budget as { turn_wait_seconds?: unknown } | undefined)?.turn_wait_seconds)
+  // Older gateways have no preflight door; malformed values must retain the
+  // conservative default rather than shortening a valid delivery.
+  const lockWaitMs = Number.isFinite(configuredWaitSeconds) && configuredWaitSeconds >= 0
+    ? configuredWaitSeconds * 1000
+    : RELAY_TURN_LOCK_WAIT_MS
+  return lockWaitMs + RELAY_TURN_ATTEMPT_MS * RELAY_TURN_MAX_ATTEMPTS + RELAY_DELIVER_SETTLEMENT_MARGIN_MS
+}
+
 /** Reconcile retention with the CURRENT connection set: pin new connections,
  *  release removed ones. Runs on every drain/roster connection fetch. */
 function syncRelayRetention(connections: RelayConnection[]) {
@@ -483,6 +493,12 @@ async function deliverRelayEnvelope(
   const attentionKey = `${target.id}::${String(envelope?.target_profile || '')}`
 
   try {
+    let budget: unknown
+    try {
+      budget = await host.requestProfile(target.route, 'bot_relay.deliver_budget', {})
+    } catch {
+      // Feature-detect the preflight door for older gateways.
+    }
     const res = await host.requestProfile<{ reply?: string }>(
       target.route,
       'bot_relay.deliver',
@@ -493,7 +509,7 @@ async function deliverRelayEnvelope(
         from_handle: String(envelope?.from_handle || ''),
         from_connection: String(sender.id)
       },
-      RELAY_DELIVER_TIMEOUT_MS
+      relayDeliverTimeoutMs(budget)
     )
 
     clearBotAttention(attentionKey)
