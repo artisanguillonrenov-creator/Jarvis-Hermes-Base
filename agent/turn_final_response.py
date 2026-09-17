@@ -152,7 +152,10 @@ def finish_text_response(
         bool(getattr(agent, "_stall_guards", True))
         and agent.valid_tool_names
         and codex_ack_continuations < 2
-        and trailing_continue_intent(agent._strip_think_blocks(final_response or ""))
+        and trailing_continue_intent(
+            agent._strip_think_blocks(final_response or ""),
+            getattr(agent, "_trailing_continue_intent_patterns", None),
+        )
     )
     if _stall_continue_intent or (
         _ack_mode != "off"
