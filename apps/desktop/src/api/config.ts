@@ -23,6 +23,85 @@ import {
   STARTUP_REQUEST_TIMEOUT_MS
 } from './client'
 
+const configReadOrigins = new WeakMap<object, { connectionId?: string; profile?: string }>()
+
+/**
+ * Electron stamps this enumerable key onto config GET payloads with the
+ * effective `(connectionId, profile)` that actually served the request.
+ * Must match `CONFIG_SERVED_ROUTE_KEY` in electron/connection-config.ts.
+ * Structured clone keeps enumerable own properties across `hermes:api` IPC.
+ */
+export const CONFIG_SERVED_ROUTE_KEY = '__hermesConfigServedRoute'
+
+/** Read and strip Electron's served-route stamp from a config GET payload. */
+export function takeConfigServedRoute(
+  record: object | undefined | null
+): { connectionId?: string; profile?: string } | undefined {
+  if (!record || typeof record !== 'object') {
+    return undefined
+  }
+
+  const raw = (record as Record<string, unknown>)[CONFIG_SERVED_ROUTE_KEY]
+
+  if (!raw || typeof raw !== 'object') {
+    return undefined
+  }
+
+  delete (record as Record<string, unknown>)[CONFIG_SERVED_ROUTE_KEY]
+
+  const connectionId = String((raw as { connectionId?: unknown }).connectionId ?? '').trim()
+  const profile = String((raw as { profile?: unknown }).profile ?? '').trim()
+
+  return {
+    ...(connectionId ? { connectionId } : {}),
+    ...(profile ? { profile } : {})
+  }
+}
+
+/** Snapshot the `(connectionId, profile)` that served a config GET. */
+export function bindConfigReadOrigin(
+  record: object,
+  origin: { connectionId?: string; profile?: string }
+): void {
+  configReadOrigins.set(record, origin)
+}
+
+export function peekConfigReadOrigin(
+  record: object | undefined | null
+): { connectionId?: string; profile?: string } | undefined {
+  return record ? configReadOrigins.get(record) : undefined
+}
+
+/**
+ * Route a config write to the identity that served the matching read.
+ * An explicit `{ connectionId, profile }` pin wins. A GET-derived record
+ * keeps its captured origin even after the registry primary changes.
+ * Unbound writes (no captured origin, no object pin) keep the live ambient
+ * capability scope — e.g. reset-to-defaults on the current connection.
+ */
+export function resolveConfigWriteScope(
+  record: object | undefined,
+  requestScope?: ProfileScope
+): { connectionId?: string; profile?: string } {
+  if (requestScope && typeof requestScope === 'object') {
+    return capabilityScoped(requestScope)
+  }
+
+  const captured = peekConfigReadOrigin(record)
+
+  if (captured) {
+    const profile =
+      typeof requestScope === 'string' && requestScope.trim() ? requestScope.trim() : captured.profile
+
+    return {
+      ...(profile ? { profile } : {}),
+      ...(captured.connectionId ? { connectionId: captured.connectionId } : {})
+    }
+  }
+
+  return capabilityScoped(requestScope)
+}
+
 export function getStatus(): Promise<StatusResponse> {
   return hermesApi<StatusResponse>({
     ...profileScoped(),
@@ -75,15 +154,27 @@ export function getHermesConfig(profile?: string): Promise<HermesConfig> {
   })
 }
 
-export function getHermesConfigRecord(
+export async function getHermesConfigRecord(
   profile?: ProfileScope,
   { includeDefaults = true }: { includeDefaults?: boolean } = {}
 ): Promise<HermesConfigRecord> {
-  return window.hermesDesktop.api<HermesConfigRecord>({
-    ...capabilityScoped(profile),
+  const requestScope = capabilityScoped(profile)
+
+  const record = await window.hermesDesktop.api<HermesConfigRecord>({
+    ...requestScope,
     ...scopedDialPriority(profile),
     path: includeDefaults ? '/api/config' : '/api/config?include_defaults=false'
   })
+
+  if (record && typeof record === 'object') {
+    // Prefer the route Electron actually dispatched to. Ambient requests may
+    // omit connectionId while main still serves the registry primary; binding
+    // the renderer request scope would leave the record unpinned.
+    const served = takeConfigServedRoute(record)
+    bindConfigReadOrigin(record, served ?? requestScope)
+  }
+
+  return record
 }
 
 export function getHermesConfigDefaults(): Promise<HermesConfigRecord> {
@@ -104,11 +195,13 @@ export function getHermesConfigSchema(profile?: null | string): Promise<ConfigSc
 
 export function saveHermesConfig(
   config: HermesConfigRecord,
-  profile?: null | string,
+  profile?: ProfileScope,
   { preserveLanguage = false }: { preserveLanguage?: boolean } = {}
 ): Promise<{ ok: boolean }> {
-  return hermesApi<{ ok: boolean }>({
-    ...profileScoped(profile),
+  // Bypass hermesApi's ambient connectionScoped() merge so a captured GET
+  // route cannot be retargeted when the live primary changes.
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...resolveConfigWriteScope(config, profile),
     ...scopedDialPriority(profile),
     path: preserveLanguage ? '/api/config?preserve_language=true' : '/api/config',
     method: 'PUT',
@@ -121,7 +214,7 @@ export function saveHermesConfig(
  *  on another registered gateway), mirroring getHermesConfigRecord. */
 export function saveHermesConfigRecord(config: HermesConfigRecord, profile?: ProfileScope): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
-    ...capabilityScoped(profile),
+    ...resolveConfigWriteScope(config, profile),
     ...scopedDialPriority(profile),
     path: '/api/config',
     method: 'PUT',
