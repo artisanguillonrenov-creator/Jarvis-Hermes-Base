@@ -15,6 +15,21 @@ import hermes_cli.setup as setup
 _BREAKAWAY_MARKER = "_HERMES_GATEWAY_BREAKAWAY"
 
 
+def test_atomic_write_removes_temp_file_when_rename_fails(tmp_path, monkeypatch):
+    """A failed Startup-folder replacement must not leave a login item behind."""
+    target = tmp_path / "Hermes_Gateway.vbs"
+    temp = tmp_path / "Hermes_Gateway.tmp"
+
+    def fail_replace(self, destination):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="rename failed"):
+        gateway_windows._atomic_write(target, "launcher", temp)
+
+    assert not temp.exists()
+
 
 
 def test_schtasks_encoding_falls_back_to_utf8(monkeypatch):
@@ -362,7 +377,6 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
 # the gateway's marker-watcher thread to drain + exit cleanly, then escalates
 # to taskkill if drain times out.
 # ---------------------------------------------------------------------------
-
 
 
 
