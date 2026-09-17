@@ -2,6 +2,8 @@ interface PoolBackend {
   process?: unknown
   port?: number | null
   token?: string | null
+  /** Present on a pooled descriptor entry (no local child): the resolved remote descriptor. */
+  connectionPromise?: null | Promise<{ authMode?: string; baseUrl?: string; headers?: Record<string, string>; token?: string | null }>
 }
 
 interface RetirementReply {
@@ -16,19 +18,49 @@ type RequestJson = (
   options: { method: string; body: Record<string, string>; timeoutMs: number }
 ) => Promise<unknown>
 
-/** Use the app's authenticated transport, never a descriptor's remote URL. */
-export function createPoolRetirementClient(requestJson: RequestJson) {
+/** Descriptor-aware transport (``fetchJsonForBackend``): never raw-fetch a descriptor URL. */
+type RequestJsonForDescriptor = (
+  descriptor: { authMode?: string; baseUrl?: string; headers?: Record<string, string>; token?: string | null },
+  path: string,
+  options: { method: string; timeoutMs: number; body: Record<string, string> }
+) => Promise<unknown>
+
+/**
+ * Use the app's authenticated transport, never a descriptor's remote URL.
+ *
+ * A pooled backend with no local child (registry/remote descriptor) is a REAL
+ * backend process too — the retired admission endpoint lives behind the same
+ * descriptor its own calls use, so the second transport is optional only for
+ * callers that never pool a descriptor shape.
+ */
+export function createPoolRetirementClient(requestJson: RequestJson, requestJsonForDescriptor?: RequestJsonForDescriptor) {
   async function request(entry: PoolBackend, action: string, token?: string): Promise<RetirementReply | null> {
-    if (!entry.process || !entry.port || !entry.token) {
-      return null
-    }
+    const options = { method: 'POST', body: { action, ...(token ? { token } : {}) }, timeoutMs: 3000 }
 
     try {
-      return await requestJson(`http://127.0.0.1:${entry.port}/api/health/retirement`, entry.token, {
-        method: 'POST',
-        body: { action, ...(token ? { token } : {}) },
-        timeoutMs: 3000,
-      }) as RetirementReply | null
+      if (entry.process) {
+        if (!entry.port || !entry.token) {
+          return null
+        }
+
+        return await requestJson(`http://127.0.0.1:${entry.port}/api/health/retirement`, entry.token, options) as RetirementReply | null
+      }
+
+      // A descriptor entry has no loopback port of its own; the fence is the
+      // backend behind its resolved connection.
+      if (!entry.connectionPromise || !requestJsonForDescriptor) {
+        return null
+      }
+
+      const descriptor = await entry.connectionPromise
+
+      if (!descriptor?.baseUrl) {
+        return null
+      }
+
+      const { method, body, timeoutMs } = options
+
+      return await requestJsonForDescriptor(descriptor, '/api/health/retirement', { method, body, timeoutMs }) as RetirementReply | null
     } catch {
       // An older runtime, transport failure or unreadable reply grants no
       // authority. Prepared permits expire; committed ones remain recoverable
