@@ -10786,6 +10786,9 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
 
     const err = new Error(error.message) as any
     err.sshError = error.kind || 'unknown'
+    if (typeof error.detail === 'string' && error.detail.trim()) {
+      err.detail = error.detail
+    }
     err.isSshBootstrap = true
     throw err
   }
@@ -11241,7 +11244,22 @@ async function testDesktopConnectionConfig(input: any = {}) {
         }
       }
     } catch (error: any) {
-      return { reachable: false, sshError: error.kind || 'unknown', error: error.message }
+      const result: {
+        reachable: false
+        sshError: string
+        error: string
+        detail?: string
+      } = { reachable: false, sshError: error.kind || 'unknown', error: error.message }
+
+      if (
+        (error.kind === 'spawn-failed' || error.kind === 'ready-timeout') &&
+        typeof error.detail === 'string' &&
+        error.detail.trim()
+      ) {
+        result.detail = error.detail
+      }
+
+      return result
     } finally {
       try {
         await ssh.close()
