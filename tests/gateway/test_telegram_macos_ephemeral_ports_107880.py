@@ -9,12 +9,16 @@ Darwin must reuse getUpdates sockets (keepalive >= 1). Windows stays at 0
 (#87057). Linux stays at 0 (fail-open). Local ephemeral-port exhaustion is
 not a remote-IP failure: ``_is_retryable_connect_error`` must not walk
 fallback IPs on ``EADDRNOTAVAIL`` / ``WSAEADDRNOTAVAIL``.
+
+Platform decisions are tested via platform-as-data on the pure helper
+(``platform=...``), not by monkeypatching ``sys.platform``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import errno
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -111,46 +115,42 @@ def _wrap_connect_error(inner: BaseException) -> httpx.ConnectError:
     return err
 
 
-def test_darwin_proxy_branch_updates_pool_reuses_keepalive(monkeypatch):
-    """#107880: Darwin getUpdates pool must keep >= 1 idle socket (proxy branch)."""
-    monkeypatch.setattr(tg_adapter.sys, "platform", "darwin")
+def test_getupdates_keepalive_platform_as_data():
+    """#107880: platform-as-data — Darwin reuses; win32/linux stay at 0."""
+    base = SimpleNamespace(max_keepalive_connections=10)
+    assert tg_adapter._getupdates_max_keepalive_connections(base, platform="darwin") == 10
+    assert tg_adapter._getupdates_max_keepalive_connections(base, platform="win32") == 0
+    assert tg_adapter._getupdates_max_keepalive_connections(base, platform="linux") == 0
+
+    floor = SimpleNamespace(max_keepalive_connections=0)
+    assert tg_adapter._getupdates_max_keepalive_connections(floor, platform="darwin") == 1
+    missing = SimpleNamespace()
+    assert tg_adapter._getupdates_max_keepalive_connections(missing, platform="darwin") == 1
+
+
+def test_proxy_branch_updates_pool_uses_helper_keepalive(monkeypatch):
+    """connect() proxy branch must wire the helper's keepalive into getUpdates limits."""
+    monkeypatch.setattr(
+        tg_adapter, "_getupdates_max_keepalive_connections", lambda base_limits, platform=None: 7
+    )
     instances = _drive_connect(monkeypatch, proxy_url="http://127.0.0.1:9/")
     limits = _updates_limits_from_proxy(instances)
-    assert limits.max_keepalive_connections is not None
-    assert limits.max_keepalive_connections >= 1, (
-        "Darwin getUpdates pool must reuse sockets; max_keepalive_connections=0 "
-        "exhausts ephemeral ports via TIME_WAIT (#107880)."
+    assert limits.max_keepalive_connections == 7
+
+
+def test_fallback_branch_updates_transport_uses_helper_keepalive(monkeypatch):
+    """connect() fallback branch must wire the helper's keepalive into the inner transport."""
+    monkeypatch.setattr(
+        tg_adapter, "_getupdates_max_keepalive_connections", lambda base_limits, platform=None: 7
     )
-
-
-def test_darwin_fallback_branch_updates_transport_reuses_keepalive(monkeypatch):
-    """#107880: Darwin getUpdates limits must reach fallback inner transport."""
-    monkeypatch.setattr(tg_adapter.sys, "platform", "darwin")
     monkeypatch.delenv("HERMES_TELEGRAM_HTTP_POOL_SIZE", raising=False)
     instances = _drive_connect(
         monkeypatch, proxy_url=None, fallback_ips=["149.154.167.220"]
     )
     limits, transport = _updates_limits_from_fallback(instances)
-    assert limits.max_keepalive_connections is not None
-    assert limits.max_keepalive_connections >= 1
+    assert limits.max_keepalive_connections == 7
     asyncio.run(transport.aclose())
     asyncio.run(instances[0].kwargs["httpx_kwargs"]["transport"].aclose())
-
-
-def test_win32_control_updates_pool_keepalive_is_zero(monkeypatch):
-    """#87057: Windows getUpdates pool must still never reuse sockets."""
-    monkeypatch.setattr(tg_adapter.sys, "platform", "win32")
-    instances = _drive_connect(monkeypatch, proxy_url="http://127.0.0.1:9/")
-    limits = _updates_limits_from_proxy(instances)
-    assert limits.max_keepalive_connections == 0
-
-
-def test_linux_control_updates_pool_keepalive_is_zero(monkeypatch):
-    """Non-darwin, non-win32 platforms stay at keepalive 0 (fail-open)."""
-    monkeypatch.setattr(tg_adapter.sys, "platform", "linux")
-    instances = _drive_connect(monkeypatch, proxy_url="http://127.0.0.1:9/")
-    limits = _updates_limits_from_proxy(instances)
-    assert limits.max_keepalive_connections == 0
 
 
 def test_eaddrnotavail_connect_error_is_not_retryable():
@@ -177,3 +177,16 @@ def test_generic_connect_error_is_still_retryable():
     assert tnet._is_retryable_connect_error(timed_out) is True
     unreachable = _wrap_connect_error(OSError(errno.EHOSTUNREACH, "No route to host"))
     assert tnet._is_retryable_connect_error(unreachable) is True
+
+
+def test_stale_reuse_read_errors_do_not_walk_fallback_ips():
+    """Stale pooled-socket failures must not enter the fallback-IP walk.
+
+    ``_is_retryable_connect_error`` only classifies ConnectTimeout/ConnectError.
+    A server-FIN'd idle connection surfaces as ReadError/RemoteProtocolError on
+    the next getUpdates read — those must raise immediately (no IP churn).
+    """
+    assert tnet._is_retryable_connect_error(httpx.ReadError("Connection reset")) is False
+    assert tnet._is_retryable_connect_error(
+        httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    ) is False

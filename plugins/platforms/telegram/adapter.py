@@ -159,13 +159,13 @@ _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _FLOOD_INLINE_WAIT_CAP_SECS = 5.0
 
 
-def _getupdates_max_keepalive_connections(base_limits) -> int:
+def _getupdates_max_keepalive_connections(base_limits, platform: str = sys.platform) -> int:
     """Darwin reuses getUpdates sockets so TIME_WAIT cannot exhaust ephemeral ports (#107880).
 
-    Reads ``sys.platform`` at call time so tests can monkeypatch. Windows stays at 0
-    (#87057). Other platforms stay at 0 (fail-open).
+    ``platform`` defaults to ``sys.platform``; tests pass an explicit value (platform-as-data).
+    Windows stays at 0 (#87057). Other platforms stay at 0 (fail-open).
     """
-    if sys.platform != "darwin":
+    if platform != "darwin":
         return 0
     keepalive = getattr(base_limits, "max_keepalive_connections", None)
     if keepalive is None or keepalive < 1:
