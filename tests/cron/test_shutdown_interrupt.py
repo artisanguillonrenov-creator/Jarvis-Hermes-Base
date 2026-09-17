@@ -12,6 +12,7 @@ Covers the cron/scheduler.py primitives directly:
 """
 
 import threading
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -535,6 +536,104 @@ class TestCallerLossAfterClaimAcquisition:
             refreshed = jobs.get_job(job["id"])
             assert refreshed["fire_claim"] is None
             assert refreshed["last_status"] == "ok"
+
+
+class TestFireClaimLossAfterCompletedRun:
+    """A transient heartbeat loss must not overwrite a completed run's terminal state."""
+
+    @staticmethod
+    @contextmanager
+    def _owned_fence(*_args, **_kwargs):
+        yield True
+
+    def _run_body(self, monkeypatch, *, heartbeat_result, completed=True):
+        import cron.scheduler as sched
+
+        claim_lost = threading.Event()
+        job = {
+            "id": "long-running-job",
+            "name": "long running job",
+            "execution_id": "completed-execution",
+            "fire_claim": {"by": "fire-owner"},
+        }
+        marked = []
+        finished = []
+        saved = []
+
+        monkeypatch.setattr(sched, "claim_dispatch", lambda *_args: True)
+        monkeypatch.setattr(sched, "mark_execution_running", lambda *_args: {})
+        monkeypatch.setattr(sched, "heartbeat_fire_claim", lambda *_args, **_kwargs: heartbeat_result)
+        monkeypatch.setattr(sched, "fire_claim_fence", self._owned_fence)
+        monkeypatch.setattr(
+            sched, "run_job",
+            lambda *_args, **_kwargs: (
+                claim_lost.set() or completed,
+                "complete durable report" if completed else "partial output",
+                "completed response" if completed else "",
+                None if completed else "cancelled before terminal completion",
+            ),
+        )
+        monkeypatch.setattr(
+            sched, "save_job_output", lambda *_args: saved.append(True) or "/tmp/report.md"
+        )
+        monkeypatch.setattr(
+            sched, "mark_job_run", lambda *args, **kwargs: marked.append((args, kwargs)) or True
+        )
+        monkeypatch.setattr(
+            sched, "finish_execution", lambda *args, **kwargs: finished.append((args, kwargs))
+        )
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(sched, "_is_cron_silence_response", lambda *_args: False)
+        monkeypatch.setattr(sched, "_resolve_incidents_for_recovered_job", lambda *_args: None)
+        monkeypatch.setattr("agent.secret_scope.build_profile_secret_scope", lambda *_args: None)
+        monkeypatch.setattr("agent.secret_scope.set_secret_scope", lambda *_args: None)
+        monkeypatch.setattr("agent.secret_scope.reset_secret_scope", lambda *_args: None)
+        monkeypatch.setattr("tools.terminal_scope.install_profile_terminal_scope", lambda *_args: None)
+        monkeypatch.setattr("tools.terminal_scope.reset_terminal_scope", lambda *_args: None)
+
+        result = sched._run_one_job_body(
+            job, fire_claim_lost=claim_lost, execution_token=object()
+        )
+        return result, marked, finished, saved
+
+    def test_completed_response_is_preserved_when_ownership_revalidates(self, monkeypatch):
+        result, marked, finished, saved = self._run_body(monkeypatch, heartbeat_result=True)
+
+        assert result is True
+        assert saved == [True]
+        assert marked == [
+            (("long-running-job", True, None), {"delivery_error": None, "expected_fire_owner": "fire-owner"})
+        ]
+        assert finished[0][1]["success"] is True
+
+    def test_incomplete_run_with_lost_owner_stays_fenced_out(self, monkeypatch):
+        result, marked, finished, saved = self._run_body(
+            monkeypatch, heartbeat_result=False, completed=False
+        )
+
+        assert result is True
+        assert saved == []
+        assert marked == []
+        assert finished == [
+            (("completed-execution",), {
+                "success": False,
+                "error": "Fire claim ownership lost; stale result was discarded.",
+            })
+        ]
+
+    def test_transport_cancellation_remains_interrupted_when_claim_is_healthy(self, monkeypatch):
+        import cron.scheduler as sched
+
+        fire_claim_lost = threading.Event()
+        transport_cancel = threading.Event()
+        transport_cancel.set()
+        combined = sched._CombinedCancelEvent(fire_claim_lost, transport_cancel)
+        fence = sched._FireOwnership(
+            {"id": "transport-cancel", "fire_claim": {"by": "fire-owner"}}, combined
+        )
+        monkeypatch.setattr(sched, "heartbeat_fire_claim", lambda *_args, **_kwargs: True)
+
+        assert fence.lost() is True
 
 
 class TestRunOneJobHonoursInterruptedFlag:

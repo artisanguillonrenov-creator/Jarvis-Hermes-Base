@@ -544,6 +544,14 @@ class _CombinedCancelEvent:
         for event in self._events:
             event.set()
 
+    def fire_claim_is_set(self) -> bool:
+        """Whether the scheduler's fire-claim heartbeat, rather than another caller, cancelled."""
+        return bool(self._events) and self._events[0].is_set()
+
+    def other_cancel_is_set(self) -> bool:
+        """Whether a transport-level cancellation source requested an interruption."""
+        return any(event.is_set() for event in self._events[1:])
+
 
 def get_running_job_ids() -> "frozenset[str]":
     """Thread-safe snapshot of executing job IDs (dispatch until ``_process_job`` returns). Read by
@@ -2631,10 +2639,13 @@ class _FireOwnership:
         return fire_claim_fence(self.job["id"], expected_owner=self.owner)
 
     def lost(self) -> bool:
-        if self.fire_claim_lost is not None and self.fire_claim_lost.is_set():
-            return True
+        claim_loss_signaled = self.fire_claim_lost is not None and self.fire_claim_lost.is_set()
+        if isinstance(self.fire_claim_lost, _CombinedCancelEvent):
+            if self.fire_claim_lost.other_cancel_is_set():
+                return True
+            claim_loss_signaled = self.fire_claim_lost.fire_claim_is_set()
         if self.owner is None:
-            return False
+            return claim_loss_signaled
         if self_removal_delivery_allowed(self.job["id"]):
             # The run deleted its own record; there is no claim left to re-resolve.
             return False
@@ -2644,7 +2655,8 @@ class _FireOwnership:
         except Exception:
             logger.debug(
                 "Job '%s': fire_claim ownership validation failed", self.job["id"], exc_info=True)
-            return False
+            # An already-signaled loss is fail-closed; a first validation failure remains best-effort.
+            return claim_loss_signaled
         if self.fire_claim_lost is not None:
             self.fire_claim_lost.set()
         return True
