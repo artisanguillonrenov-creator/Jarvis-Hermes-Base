@@ -1,0 +1,14 @@
+name: prompt-enhancer
+repo: https://github.com/Heybinshao/prompt-enhancer
+sha: 60653856aa0496243ab87552df014e1fcc4f1b69
+description: "A composer button for Hermes Desktop that rewrites a rough draft into a structured prompt (task / scope / constraints / output shape) and restores the original on a second click. One stateless gateway call, preserves @file and /command chips, per-session state. UI in EN / 简中 / 繁體."
+maintainer: Heybinshao
+tier: community
+category: desktop
+docs_url: https://github.com/Heybinshao/prompt-enhancer#readme
+version: "1.2.0"
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
