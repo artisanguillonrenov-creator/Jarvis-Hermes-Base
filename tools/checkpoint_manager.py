@@ -608,6 +608,23 @@ class CheckpointManager:
         """Reset per-turn dedup.  Call at the start of each agent iteration."""
         self._checkpointed_dirs.clear()
 
+    def unsupported_backend_reason(self, task_id: str = "default") -> Optional[str]:
+        """Explain why host checkpoints are off limits for a container-backed session.
+
+        Classifies the task's backend at call time (nothing is remembered), so /rollback is
+        refused before the first mutation and follows a backend change within the session."""
+        try:
+            from tools.file_tools_paths import container_backend_for_task
+            backend = container_backend_for_task(task_id)
+        except Exception:
+            backend = None
+        if backend is None:
+            return None
+        return (
+            f"Checkpoints are not taken for terminal.backend={backend}: "
+            "file paths belong to the container, not this host."
+        )
+
     # --- public API ---
 
     def record_agent_write(self, file_path: str) -> None:
