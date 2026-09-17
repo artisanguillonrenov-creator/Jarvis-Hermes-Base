@@ -111,28 +111,37 @@ class TestReceiptAlwaysFinalized:
         assert latest is not None
         assert latest["outcome"] == outcome
 
-    def test_nothing_on_disk_until_finalize(self, receipt_home):
-        """The receipt is written atomically at finalize — a run that is
-        still going (or that dies) has NO on-disk artifact to misread."""
+    def test_failed_fleet_settlement_keeps_running_receipt_after_module_state_loss(self, receipt_home):
+        """A restart/settlement failure cannot erase the evidence of a begun update."""
         ur.begin_update_receipt()
-        ur.record_step("pre_update_backup", True)
-        assert _receipt_files(receipt_home) == []
+        ur.record_gateway_restart(
+            restarted_services=["hermes-gateway.service"],
+            incomplete=True,
+            phase_error="fleet settlement returned no rows",
+        )
+
+        # Simulate the post-pull module-identity loss before the command
+        # boundary can finalize the receipt.
+        ur._current = None
+
+        receipts = _receipt_files(receipt_home)
+        assert len(receipts) == 2  # update record plus latest.json
+        latest = ur.read_latest_receipt()
+        assert latest is not None
+        assert latest["outcome"] == "running"
+        assert latest["gateway_restart"]["incomplete"] is True
 
     def test_crash_without_finalize_never_claims_success(self, receipt_home):
-        """Simulated crash: begin + steps, then the process dies (fresh
-        module state). The Desktop's reader (#92780 reads the receipt via
-        read_latest_receipt) must see NO successful update."""
+        """A lost module singleton leaves a running receipt, never success."""
         ur.begin_update_receipt()
         ur.record_step("git_pull", True)
         ur.record_step("pip_install", True)
         # Crash: module singleton is gone, finalize never ran.
         ur._current = None
 
-        assert _receipt_files(receipt_home) == []
         latest = ur.read_latest_receipt()
-        # No receipt at all — the reader cannot report success. If this
-        # ever returns a dict, it must not claim a completed success.
-        assert latest is None or latest.get("outcome") != "success"
+        assert latest is not None
+        assert latest["outcome"] == "running"
 
     def test_boundary_safety_net_records_crash_as_not_success(
         self, receipt_home
