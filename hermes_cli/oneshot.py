@@ -245,6 +245,7 @@ def run_oneshot(
     usage_file: Optional[str] = None,
     resume: Optional[str] = None,
     reasoning: object = None,
+    session_source: str | None = None,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -305,6 +306,7 @@ def run_oneshot(
                 resume=resume,
                 reasoning=reasoning,
                 ledger=bool(usage_file),
+                session_source=session_source,
             )
         except BaseException as exc:  # noqa: BLE001
             # Capture anything escaping the agent (OSError from prompt_toolkit on a non-TTY pipe,
@@ -497,6 +499,7 @@ def _run_agent(
     resume: Optional[str] = None,
     reasoning: object = None,
     ledger: bool = False,
+    session_source: str | None = None,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn, run one conversation, and return
     ``(final_response, run_result)``. Imports are local to keep CLI startup cheap. *ledger* (set when
@@ -553,6 +556,12 @@ def _run_agent(
     # The try spans agent construction (not just ``chat``) so the store is always closed, even when
     # ``AIAgent(...)`` raises — the one-shot exit path hard-exits via os._exit and skips finalizers.
     agent = None
+    # A finite invocation is an automation task, even when a WebUI/TUI-backed
+    # runtime supplied an interactive source context.  Preserve an explicit
+    # --source value, otherwise keep its durable row out of human session lists.
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    source_tokens = set_session_vars(source=session_source or "tool")
     try:
         agent = AIAgent(
             api_key=runtime.get("api_key"),
@@ -587,7 +596,10 @@ def _run_agent(
                                     fallback_session_id=agent.session_id or resume_sid)
         return (result.get("final_response") or "", result)
     finally:
-        _close_agent(agent, session_db)
+        try:
+            _close_agent(agent, session_db)
+        finally:
+            clear_session_vars(source_tokens)
 
 
 def _quietly(what: str, fn) -> None:

@@ -568,9 +568,11 @@ def test_oneshot_dispatch_forwards_reasoning_override(monkeypatch):
             model="zai-org/GLM-5.3",
             provider="actual",
             reasoning="high",
+            session_source="custom",
         )
 
     assert captured["reasoning"] == "high"
+    assert captured["session_source"] == "custom"
 
 
 def test_actual_agent_side_routing_keeps_chat_completions_for_any_model():
