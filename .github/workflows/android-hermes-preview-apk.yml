@@ -1,0 +1,95 @@
+name: Build Hermes Android Preview APK
+
+on:
+  push:
+    branches:
+      - chatgpt/android-hermes-preview-apk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.0'
+          cache: npm
+
+      - name: Use repository-compatible npm
+        run: npm install -g npm@11.19.1
+
+      - name: Install Desktop renderer dependencies
+        id: npm_install
+        continue-on-error: true
+        run: npm ci --workspace apps/desktop --workspace apps/shared --include-workspace-root
+
+      - name: Build real Hermes Desktop renderer
+        id: renderer
+        continue-on-error: true
+        run: npm exec --workspace apps/desktop -- vite build
+
+      - name: Stage renderer for Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS="android/hermes-preview/app/src/main/assets/www"
+          rm -rf "$ASSETS"
+          mkdir -p "$ASSETS"
+
+          if [ -f apps/desktop/dist/index.html ]; then
+            echo "Using real Hermes Desktop Vite renderer"
+            cp -R apps/desktop/dist/. "$ASSETS/"
+            cp android/hermes-preview/android-bridge-shim.js "$ASSETS/android-bridge-shim.js"
+            python - <<'PY'
+          from pathlib import Path
+          p = Path('android/hermes-preview/app/src/main/assets/www/index.html')
+          s = p.read_text(encoding='utf-8')
+          marker = '<script src="./android-bridge-shim.js"></script>'
+          if marker not in s:
+              if '</head>' in s:
+                  s = s.replace('</head>', marker + '\n</head>', 1)
+              else:
+                  s = marker + '\n' + s
+          p.write_text(s, encoding='utf-8')
+          PY
+          else
+            echo "Renderer build unavailable; packaging fallback page"
+            cp -R android/hermes-preview/fallback/. "$ASSETS/"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build debug APK
+        run: gradle -p android/hermes-preview :app:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: |
+          cp android/hermes-preview/app/build/outputs/apk/debug/app-debug.apk Hermes-Android-Preview.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hermes-Android-Preview-APK
+          path: Hermes-Android-Preview.apk
+          if-no-files-found: error
+          retention-days: 14
