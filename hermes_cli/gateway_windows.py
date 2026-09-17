@@ -405,8 +405,18 @@ def _write_task_script() -> Path:
 
 def _atomic_write(path: Path, content: str, tmp: Path) -> None:
     """Write ``content`` verbatim (no newline translation) via ``tmp`` then rename over ``path``."""
-    tmp.write_text(content, encoding="utf-8", newline="")
-    tmp.replace(path)
+    try:
+        tmp.write_text(content, encoding="utf-8", newline="")
+        tmp.replace(path)
+    except OSError:
+        # A staging file left in the Startup folder is opened by Windows at
+        # every login (#114093); elsewhere it is still debris. Best-effort
+        # discard, then surface the original failure.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 # ── Install / uninstall
@@ -908,6 +918,13 @@ def _write_start_attestation(pids: list[int], via: str, home: Path | None = None
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
     except Exception:
+        # A failed swap must not leave the staging .json.tmp behind (same
+        # fail-clean rule as _atomic_write, #114093). Re-derive the path so
+        # failures raised before ``tmp`` was bound still clean up.
+        try:
+            _start_attestation_path(home).with_suffix(".json.tmp").unlink(missing_ok=True)
+        except Exception:
+            pass
         logger.debug("Failed to write gateway start attestation", exc_info=True)
 
 
@@ -1157,6 +1174,7 @@ def uninstall() -> None:
 
     for path, label in (
         (get_startup_entry_path(), "Windows login item"), (_legacy_startup_entry_path(), "legacy Windows login item"),
+        (get_startup_entry_path().with_suffix(".tmp"), "Windows login item staging file"),
         (script_path, "Task script"), (script_path.with_suffix(".vbs"), "Task launcher"),
     ):
         try:
