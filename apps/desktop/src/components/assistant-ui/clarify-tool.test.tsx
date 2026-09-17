@@ -240,6 +240,7 @@ describe('ClarifyTool args-only pending card', () => {
   it('enables the same single-question card once the matching request arrives', async () => {
     messageRunning = false
     const request = vi.fn().mockResolvedValue({ ok: true })
+    const respond = liveServerRequest('request-1')
 
     $activeSessionId.set('session-1')
     $gateway.set({ request } as never)
@@ -265,10 +266,7 @@ describe('ClarifyTool args-only pending card', () => {
     fireEvent.click(screen.getByRole('button', { name: /Continue/ }))
 
     await waitFor(() => {
-      expect(request).toHaveBeenCalledWith('clarify.respond', {
-        answer: 'staging',
-        request_id: 'request-1'
-      })
+      expect(respond).toHaveBeenCalledWith({ answer: 'staging' })
     })
   })
 
@@ -309,12 +307,12 @@ describe('ClarifyTool args-only pending card', () => {
     await waitFor(() => {
       expect(request).toHaveBeenCalledTimes(2)
     })
-    expect(request).toHaveBeenNthCalledWith(1, 'clarify.respond', {
+    expect(request).toHaveBeenNthCalledWith(1, 'clarify.lock', {
       answer: 'red',
       question_id: 'q0',
       request_id: 'request-batch'
     })
-    expect(request).toHaveBeenNthCalledWith(2, 'clarify.respond', {
+    expect(request).toHaveBeenNthCalledWith(2, 'clarify.lock', {
       answer: 'packet',
       question_id: 'q1',
       request_id: 'request-batch'
