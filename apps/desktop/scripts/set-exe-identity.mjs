@@ -44,10 +44,8 @@ import { isMain } from './utils.mjs'
 
 // A real-time file scanner (AV/EDR) holds a short exclusive handle on a freshly
 // written exe; rcedit's resource commit then fails with "Unable to commit
-// changes" and succeeds seconds later on identical input. Retrying on ANY
-// rcedit failure keeps the shape simple — a permanent failure costs 3.5 s more
-// before after-pack.mjs swallows it. Delays sized to the field report: the
-// lock was still held 5 s after a first attempt in some runs.
+// changes" and succeeds seconds later on identical input. Retry only that
+// commit failure; delays sized to the field report (lock still held ~5 s).
 const RCEDIT_COMMIT_RETRY_DELAYS_MS = [500, 1000, 2000]
 
 function wait(delay) {
@@ -91,10 +89,10 @@ async function stampExeIdentity(
       break
     } catch (err) {
       const delay = RCEDIT_COMMIT_RETRY_DELAYS_MS[attempt]
-      if (delay === undefined) {
+      if (!/unable to commit changes/i.test(err?.message) || delay === undefined) {
         throw err
       }
-      console.warn(`[set-exe-identity] rcedit failed; retrying in ${delay}ms (${err.message})`)
+      console.warn(`[set-exe-identity] rcedit commit failed; retrying in ${delay}ms (${err.message})`)
       await sleep(delay)
     }
   }
