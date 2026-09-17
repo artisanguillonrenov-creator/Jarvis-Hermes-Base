@@ -141,6 +141,33 @@ def test_runner_rehydrates_override_after_restart(store_factory):
     assert route["runtime"]["capabilities"] == {"openai_native_compaction": True}
 
 
+def test_runner_rehydrates_copilot_runtime_for_persisted_model(store_factory):
+    """A restored Copilot override must derive its wire mode from its own model."""
+    store = store_factory()
+    entry = store.get_or_create_session(_make_source())
+    session_key = entry.session_key
+    store.set_model_override(session_key, {
+        "model": "gemini-3.8-flash",
+        "provider": "copilot",
+        "base_url": "https://api.githubcopilot.com",
+    })
+
+    runner = _make_runner(store_factory())
+    with patch(
+        "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+        return_value={
+            "api_key": "copilot-token",
+            "api_mode": "chat_completions",
+            "base_url": "https://api.githubcopilot.com",
+            "provider": "copilot",
+        },
+    ) as resolve_runtime:
+        runner._rehydrate_session_model_override(session_key)
+
+    resolve_runtime.assert_called_once_with("copilot", target_model="gemini-3.8-flash")
+    assert runner._session_model_overrides[session_key]["api_mode"] == "chat_completions"
+
+
 def test_sanitize_model_override():
     assert sanitize_model_override(None) is None
     assert sanitize_model_override({}) is None
