@@ -663,6 +663,25 @@ def _get_bot_chat_delivery_timeout() -> int:
         return 600
 
 
+def _get_bot_chat_subprocess_timeout() -> float:
+    """Reserve the delivery turn budget and its one-shot completion linger.
+
+    The legacy lane invokes ``hermes chat -Q`` in a child process.  After the
+    turn finishes, that child can legitimately remain alive while draining
+    ``notify_on_complete`` work for ``oneshot_completion_wait_seconds``.  The
+    parent timeout therefore needs both budgets; otherwise equal default
+    values make a completed delivery look like a delivery timeout.
+    """
+    delivery_timeout = _get_bot_chat_delivery_timeout()
+    try:
+        from tools.process_registry import ProcessRegistry
+
+        linger_timeout = max(float(ProcessRegistry._oneshot_completion_wait_seconds()), 0.0)
+    except Exception:
+        linger_timeout = 0.0
+    return delivery_timeout + linger_timeout
+
+
 _BOT_CHAT_STDERR_TAIL = 500
 # stdout is the model's answer; only a short tail is persisted (jobs.json / ledger).
 _BOT_CHAT_STDOUT_TAIL = 200
@@ -824,8 +843,9 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Opt
             "chat", "--in", "~", "-c", "Bot Chat", "--create-if-missing",
             "-Q", "--query-file", query_file,
         ]
+        subprocess_timeout = _get_bot_chat_subprocess_timeout()
         result = subprocess.run(
-            argv, capture_output=True, text=True, timeout=_get_bot_chat_delivery_timeout(), env=env,
+            argv, capture_output=True, text=True, timeout=subprocess_timeout, env=env,
             creationflags=windows_hide_flags())
         if result.returncode != 0:
             tail = _format_failure_streams(result)

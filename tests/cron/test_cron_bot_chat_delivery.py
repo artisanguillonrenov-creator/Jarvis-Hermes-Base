@@ -212,6 +212,26 @@ def test_deliver_timeout_returns_error_string():
     assert "timed out" in err
 
 
+def test_deliver_timeout_includes_oneshot_completion_linger():
+    """A completed turn may still keep its quiet subprocess alive to drain replies."""
+    calls = {}
+
+    def fake_run(argv, **kwargs):
+        calls["timeout"] = kwargs["timeout"]
+        return _completed()
+
+    with mock.patch.object(sched_delivery, "_get_bot_chat_delivery_timeout", return_value=60), \
+         mock.patch(
+             "tools.process_registry.ProcessRegistry._oneshot_completion_wait_seconds",
+             return_value=30,
+         ), \
+         mock.patch.object(sched.subprocess, "run", side_effect=fake_run), \
+         mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"):
+        assert _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "") is None
+
+    assert calls["timeout"] == 90
+
+
 def test_deliver_message_carries_cron_attribution(tmp_path):
     """The injected turn must self-identify as scheduled output, not the user."""
     captured = {}
