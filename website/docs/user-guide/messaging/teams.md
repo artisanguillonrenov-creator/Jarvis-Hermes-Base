@@ -169,6 +169,17 @@ Open the printed link in your browser — it opens directly in the Teams client.
 | `TEAMS_HOME_CHANNEL_NAME` | Display name for the home channel |
 | `TEAMS_PORT` | Webhook port (default: `3978`) |
 
+### Optional local homologation target
+
+Hermes includes a disabled-by-default local Playground seam for testing a near-Teams UI without changing the production Teams adapter. The Microsoft 365 Agents Playground is a local UI client, not the bot endpoint: it receives the Hermes webhook through `-e`, sends Bot Framework Activity envelopes to it, and uses the Activity's `serviceUrl` for callbacks. Configure the Hermes bot endpoint explicitly:
+
+```bash
+TEAMS_PLAYGROUND_URL=http://127.0.0.1:3978/api/messages
+TEAMS_PLAYGROUND_ALLOW_PRIVATE=true
+```
+
+The dashboard validates that endpoint before showing the local UI URL (`http://127.0.0.1:56150`) and the bot callback endpoint. The installed CLI command is `agentsplayground -e <endpoint> -c emulator --disable-telemetry`. Loopback, private, and `.local`/`.lan`/`.internal` hosts require explicit opt-in; public hosts, credentials, query strings, cloud metadata addresses, non-HTTP schemes, and paths other than `/api/messages` are rejected. The health check probes the local bridge (`/api/health`, falling back to `/health`), sends no Teams credentials, and does not restart the gateway or mutate production Teams settings when it fails.
+
 ### config.yaml
 
 Alternatively, configure via `~/.hermes/config.yaml`:

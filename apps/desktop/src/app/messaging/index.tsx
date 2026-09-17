@@ -21,6 +21,7 @@ import {
   type PairingUser,
   revokePairing,
   type TelegramOnboardingApplyResponse,
+  testTeamsPlayground,
   updateMessagingPlatform
 } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
@@ -680,6 +681,7 @@ function PlatformDetail({
   const { t } = useI18n()
   const m = t.messaging
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [playgroundMessage, setPlaygroundMessage] = useState<string | null>(null)
 
   const requiredFields = platform.env_vars.filter(field => field.required)
   const optionalFields = platform.env_vars.filter(field => !field.required && !fieldCopy(field, m).advanced)
@@ -708,6 +710,30 @@ function PlatformDetail({
           <PlatformHint platform={platform} />
         </div>
       </header>
+
+      {platform.id === 'teams' && platform.playground?.enabled && (
+        <section>
+          <SectionTitle>Local Teams Playground</SectionTitle>
+          <p className="mt-1 text-sm text-muted-foreground">
+            The Microsoft 365 Agents Playground is a local UI client. It sends Bot Framework activities to the configured bot endpoint; production Teams credentials are not used.
+          </p>
+          <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+            {platform.playground.test_url && <div>Test URL: {platform.playground.test_url}</div>}
+            {platform.playground.callback_url && <div>Callback URL: {platform.playground.callback_url}</div>}
+          </div>
+          <Button
+            className="mt-3"
+            onClick={() => {
+              void testTeamsPlayground(scopeProfile).then(result => setPlaygroundMessage(result.message))
+            }}
+            size="sm"
+            variant="secondary"
+          >
+            Test local Playground
+          </Button>
+          {playgroundMessage && <p className="mt-2 text-xs text-muted-foreground">{playgroundMessage}</p>}
+        </section>
+      )}
 
       {platform.error_message && <ErrorBanner>{platform.error_message}</ErrorBanner>}
 
