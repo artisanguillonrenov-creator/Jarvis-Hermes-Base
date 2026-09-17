@@ -17,11 +17,15 @@ Contract under test:
   OS-assigned port.
 """
 
+import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -101,9 +105,13 @@ def _spawn_serve(port: int, tmp_path: Path, merge_stderr: bool = True) -> subpro
         PYTHONUNBUFFERED="1",
     )
     # Ensure a stray desktop-parent env can't arm the watchdog/reaper paths.
-    for k in ("HERMES_DESKTOP", "HERMES_PARENT_PID", "HERMES_PARENT_START_MARKER",
-              "HERMES_PARENT_NONCE"):
-        env.pop(k, None)
+    for key in (
+        "HERMES_DESKTOP",
+        "HERMES_PARENT_PID",
+        "HERMES_PARENT_START_MARKER",
+        "HERMES_PARENT_NONCE",
+    ):
+        env.pop(key, None)
     code = (
         "from hermes_cli.web_server import start_server\n"
         f"start_server(host='127.0.0.1', port={port}, open_browser=False, "
@@ -122,6 +130,60 @@ def _spawn_serve(port: int, tmp_path: Path, merge_stderr: bool = True) -> subpro
         stderr=subprocess.STDOUT if merge_stderr else subprocess.DEVNULL,
         text=True,
     )
+
+
+def _spawn_desktop_serve(tmp_path: Path, ready_file: Path) -> subprocess.Popen:
+    """Launch the real CLI path with Desktop's spawn-token contract."""
+    home = tmp_path / "hermes_home"
+    home.mkdir(exist_ok=True)
+    (home / ".env").write_text(
+        "HERMES_DASHBOARD_SESSION_TOKEN=backend-resolved-token\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env.update(
+        HERMES_HOME=str(home),
+        HERMES_SERVE_HEADLESS="1",
+        HERMES_DESKTOP_READY_FILE=str(ready_file),
+        HERMES_DASHBOARD_SESSION_TOKEN="desktop-spawn-token",
+        PYTHONUNBUFFERED="1",
+    )
+    for key in (
+        "HERMES_DESKTOP",
+        "HERMES_PARENT_PID",
+        "HERMES_PARENT_START_MARKER",
+        "HERMES_PARENT_NONCE",
+    ):
+        env.pop(key, None)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _api_status(port: int, token: str) -> int:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/config",
+        headers={"X-Hermes-Session-Token": token},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
 
 
 def _read_until(proc: subprocess.Popen, token: str, timeout: float = 120.0):
@@ -168,6 +230,7 @@ def test_conflict_emits_sentinel_and_exit_75(tmp_path):
     assert out.count("BACKEND_PORT_IN_USE") == 1
 
 
+@pytest.mark.live_system_guard_bypass
 def test_free_port_boots_and_announces_ready(tmp_path):
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -189,6 +252,7 @@ def test_free_port_boots_and_announces_ready(tmp_path):
             proc.kill()
 
 
+@pytest.mark.live_system_guard_bypass
 def test_ephemeral_port_zero_unaffected(tmp_path):
     proc = _spawn_serve(0, tmp_path)
     try:
@@ -208,6 +272,7 @@ def test_ephemeral_port_zero_unaffected(tmp_path):
             proc.kill()
 
 
+@pytest.mark.live_system_guard_bypass
 def test_ready_sentinel_arrives_on_stdout_not_stderr(tmp_path):
     """#96282 — the Desktop spawn watches child.stdout for the READY sentinel.
 
@@ -236,6 +301,37 @@ def test_ready_sentinel_arrives_on_stdout_not_stderr(tmp_path):
             f"stdout:\n{out}"
         )
         assert f"HERMES_BACKEND_READY port={port}" in out
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+@pytest.mark.live_system_guard_bypass
+def test_desktop_ready_file_hands_off_real_resolved_auth_token(tmp_path):
+    """Production receipt for #85327: dotenv B replaces spawn token A."""
+    ready_dir = tmp_path / "desktop-ready"
+    ready_dir.mkdir(mode=0o700)
+    ready_file = ready_dir / "backend.json"
+    proc = _spawn_desktop_serve(tmp_path, ready_file)
+
+    try:
+        ready, lines = _read_until(proc, "HERMES_BACKEND_READY")
+        output = "".join(lines)
+        assert ready, f"real hermes serve did not become ready:\n{output}"
+        payload = json.loads(ready_file.read_text(encoding="utf-8"))
+        port = payload["port"]
+
+        assert payload["session_token"] == "backend-resolved-token"
+        assert _api_status(port, "desktop-spawn-token") == 401
+        assert _api_status(port, payload["session_token"]) == 200
+        if os.name != "nt":
+            assert stat.S_IMODE(ready_dir.stat().st_mode) == 0o700
+            assert stat.S_IMODE(ready_file.stat().st_mode) == 0o600
+        assert "desktop-spawn-token" not in output
+        assert "backend-resolved-token" not in output
     finally:
         proc.terminate()
         try:
