@@ -314,9 +314,46 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert "cmd.exe" not in xml_seen["text"]
 
 
-def test_gateway_vbs_script_is_console_less(monkeypatch):
-    """The .vbs launcher must avoid cmd.exe entirely and Run pythonw hidden
-    (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A)."""
+def test_reconcile_scheduled_task_replaces_pre_hardening_registration(monkeypatch, tmp_path):
+    """An installed task without the restart policy must be replaced on update."""
+    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    stale_xml = """<Task><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+    <Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+    <Settings><StartWhenAvailable>true</StartWhenAvailable></Settings>
+    <Actions><Exec><Command>wscript.exe</Command><Arguments>//B //Nologo \"old.vbs\"</Arguments></Exec></Actions></Task>"""
+    calls = []
+
+    monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
+    monkeypatch.setattr(gateway_windows, "_query_scheduled_task_xml", lambda _name: stale_xml)
+    monkeypatch.setattr(
+        gateway_windows,
+        "_install_scheduled_task",
+        lambda name, path: calls.append((name, path)) or (True, "created"),
+    )
+
+    assert gateway_windows.reconcile_scheduled_task(script_path) is True
+    assert calls == [("Hermes_Gateway_alice", script_path)]
+
+
+def test_reconcile_scheduled_task_is_a_noop_when_live_task_matches(monkeypatch, tmp_path):
+    """A current task must not be deleted and recreated on every update."""
+    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    expected_xml = gateway_windows._build_scheduled_task_xml(
+        "Hermes_Gateway_alice", script_path.with_suffix(".vbs"), None
+    )
+    calls = []
+
+    monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
+    monkeypatch.setattr(gateway_windows, "_resolve_task_user", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_query_scheduled_task_xml", lambda _name: expected_xml)
+    monkeypatch.setattr(gateway_windows, "_install_scheduled_task", lambda *args: calls.append(args))
+
+    assert gateway_windows.reconcile_scheduled_task(script_path) is False
+    assert calls == []
+
+
+def test_gateway_vbs_script_is_console_less_and_propagates_gateway_failure(monkeypatch):
+    """The .vbs launcher stays console-less while exposing gateway failures to the task."""
     monkeypatch.setattr(
         gateway_windows,
         "_resolve_detached_python",
@@ -333,7 +370,10 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     assert "pythonw.exe" in content
     assert "hermes_cli.main" in content
     assert "gateway run" in content
-    assert ", 0, False" in content  # hidden window, detached/async
+    assert "exit_code = sh.Run(" in content
+    assert ", 0, True)" in content  # hidden window, wait for the gateway exit code
+    assert "WScript.Quit exit_code" in content
+    assert ", 0, False" not in content
     for var in ("HERMES_HOME", "PYTHONIOENCODING", "HERMES_GATEWAY_DETACHED", "VIRTUAL_ENV", "PYTHONPATH"):
         assert var in content
     assert "--profile" in content and "work" in content
@@ -362,9 +402,6 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
 # the gateway's marker-watcher thread to drain + exit cleanly, then escalates
 # to taskkill if drain times out.
 # ---------------------------------------------------------------------------
-
-
-
 
 
 
