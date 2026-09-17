@@ -220,6 +220,35 @@ def test_loop_liveness_watchdog_restores_terminal_status_after_diagnostics():
     }
 
 
+def test_loop_liveness_watchdog_stop_during_terminal_status_write_disarms_exit():
+    """A shutdown arriving inside the final synchronous write still wins."""
+    loop = MagicMock(spec=asyncio.AbstractEventLoop)
+    handle_ready = threading.Event()
+    handle_ref = {}
+
+    def stop_during_status_write(**_kwargs) -> None:
+        assert handle_ready.wait(timeout=2.0)
+        handle_ref["handle"].stop()
+
+    with (
+        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback"),
+        patch("gateway.shutdown_watchdog.os._exit") as hard_exit,
+        patch("gateway.shutdown_watchdog._mark_exited_quietly") as mark_exited,
+        patch("gateway.status.write_runtime_status", side_effect=stop_during_status_write),
+    ):
+        handle = start_loop_liveness_watchdog(
+            loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=1
+        )
+        assert handle is not None
+        handle_ref["handle"] = handle
+        handle_ready.set()
+        handle.join(timeout=2.0)
+
+    assert not handle.is_alive()
+    mark_exited.assert_not_called()
+    hard_exit.assert_not_called()
+
+
 def test_gateway_config_loop_watchdog_round_trip():
     """loop_watchdog is a config.yaml knob: default on, nested-gateway form honored."""
     from gateway.config import GatewayConfig

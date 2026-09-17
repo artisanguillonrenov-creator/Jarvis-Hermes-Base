@@ -138,6 +138,10 @@ def start_loop_liveness_watchdog(
             # The loop may recover long enough to publish its ordinary "running"
             # status while diagnostics are being collected above.
             _mark_loop_unresponsive_quietly()
+            # The status write is synchronous and can itself overlap a graceful
+            # shutdown. Preserve the late-stop-wins contract before any exit.
+            if stop_event.is_set():
+                return
             _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
             os._exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
