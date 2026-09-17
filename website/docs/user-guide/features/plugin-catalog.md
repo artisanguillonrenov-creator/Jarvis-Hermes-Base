@@ -46,6 +46,19 @@ Browse view crawls source repositories or queries the GitHub API live.
 
 This browse snapshot is distinct from the installer's
 [`plugin-catalog.json`](#live-refresh), which resolves catalog names and pins.
+## Searching from the terminal
+
+```bash
+hermes plugins search                         # Browse all entries
+hermes plugins search --category memory       # Browse one category
+hermes plugins search browser --category web  # Match text within a category
+hermes plugins search --category tools --json # Machine-readable results
+```
+
+`--category` accepts the category keys listed below. When combined with a search
+term, results must match both the category and the term. Omitting the flag keeps
+the normal search across all categories; no matches produce an empty JSON
+`results` list or a terminal message.
 
 ## What's in an entry
 
