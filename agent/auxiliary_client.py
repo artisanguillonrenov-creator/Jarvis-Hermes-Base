@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+from agent.auxiliary_structured_output import remember_structured_output_rejection
 from agent.codex_headers import (
     CODEX_AUX_BASE_URL as _CODEX_AUX_BASE_URL,
     apply_required_codex_headers as _apply_required_codex_headers,
@@ -3232,6 +3233,22 @@ def _without_structured_output_format(kwargs: dict) -> Optional[dict]:
     return retry_kwargs if changed else None
 
 
+def _fallback_structured_output_retry_kwargs(
+    fb_err: Exception, fb_kwargs: Dict[str, Any], task: Optional[str], fb_label: str,
+) -> Optional[Dict[str, Any]]:
+    """Fallback candidates get the primary path's structured-output rung: a candidate that rejects
+    ``response_format`` (DeepSeek: "This response_format type is unavailable now") is retried once
+    without it instead of aborting the whole task after the primary provider already failed (#83390)."""
+    if not _is_structured_output_rejection(fb_err):
+        return None
+    retry_kwargs = _without_structured_output_format(fb_kwargs)
+    if retry_kwargs is not None:
+        logger.info("Auxiliary %s: fallback candidate %s rejected the structured-output format field; "
+                    "retrying once without it (schema enforcement degrades to prompt compliance): %s",
+                    task or "call", fb_label, fb_err)
+    return retry_kwargs
+
+
 def _is_reasoning_field_rejection(exc: Exception) -> bool:
     """Provider 400 rejecting a reasoning wire control by name (``reasoning_effort``, ``reasoning``,
     ``thinking``/``think``). Chat-only models behind OpenAI-compatible relays reject the top-level
@@ -3888,6 +3905,11 @@ def _call_fallback_candidate_sync(
     try:
         return _send(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        retry_kwargs = _fallback_structured_output_retry_kwargs(fb_err, fb_kwargs, task, fb_label)
+        if retry_kwargs is not None:
+            resp = _send(fb_client, retry_kwargs, destination)
+            remember_structured_output_rejection(destination.provider, destination.base_url, fb_kwargs, fb_err)
+            return resp
         if not _is_auth_error(fb_err):
             raise
         fb_provider, retry = _plan_fallback_auth_retry(
@@ -3927,6 +3949,11 @@ async def _call_fallback_candidate_async(
     try:
         return await _send(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        retry_kwargs = _fallback_structured_output_retry_kwargs(fb_err, fb_kwargs, task, fb_label)
+        if retry_kwargs is not None:
+            resp = await _send(fb_client, retry_kwargs, destination)
+            remember_structured_output_rejection(destination.provider, destination.base_url, fb_kwargs, fb_err)
+            return resp
         if not _is_auth_error(fb_err):
             raise
         fb_provider, retry = _plan_fallback_auth_retry(
@@ -6306,7 +6333,11 @@ def _build_call_kwargs(
     reasoning_config = clamp_reasoning_config(reasoning_config)
     projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config)
     kwargs.update(projection.top_level)
-    if merged_extra := _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm):
+    merged_extra = _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm)
+    if "response_format" in merged_extra:
+        from agent.auxiliary_structured_output import without_unsupported_response_format
+        merged_extra = without_unsupported_response_format(merged_extra, provider_norm, effective_base, model, task)
+    if merged_extra:
         kwargs["extra_body"] = merged_extra
     # Anthropic Messages adapters take reasoning via a private kwarg that plain OpenAI SDK clients
     # would reject; Portal Claude is dual-wire, so include it only when the catalog id selects
@@ -7051,9 +7082,11 @@ def _ladder_parameter_rungs(
             logger.info("Auxiliary %s%s: provider rejected the structured-output "
                         "format field; retrying once without it (schema "
                         "enforcement degrades to prompt compliance): %s", task or "call", tag, first_err)
+            rejection = first_err
             resp, first_err = yield from _rung(
                 _LadderStep("call", (client, retry_kwargs)), _param_rung_accepts)
             if first_err is None:
+                remember_structured_output_rejection(route.resolved_provider, route.base_info, kwargs, rejection)
                 return resp, None, retry_kwargs
             kwargs = retry_kwargs
     # A chat-only model on an OpenAI-compatible relay rejects the profile's thinking-off encoding
