@@ -58,7 +58,7 @@ def test_unauthenticated_models_200_is_warn_not_ok(monkeypatch):
 
 
 def test_authenticated_200_unauth_401_stays_ok(monkeypatch):
-    """Fail-open CONTROL: endpoint that does authenticate stays ✓."""
+    """Positive CONTROL: credential-free 401 discriminates → verified ✓."""
 
     def fake_get(url, headers=None, timeout=None):
         headers = headers or {}
@@ -75,21 +75,31 @@ def test_authenticated_200_unauth_401_stays_ok(monkeypatch):
 
 
 def test_unauthenticated_baseline_exception_is_warn(monkeypatch):
+    """Negative control: baseline exception is unverifiable, never ✓."""
+
     def fake_get(url, headers=None, timeout=None):
         if "Authorization" in (headers or {}):
             return SimpleNamespace(status_code=200)
         raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    assert _WARN in _glyph(_probe(monkeypatch))
+    result = _probe(monkeypatch)
+    assert _WARN in _glyph(result)
+    assert _OK not in _glyph(result)
+    assert "could not verify" in _detail(result).lower()
 
 
 def test_unauthenticated_ambiguous_status_is_warn(monkeypatch):
+    """Negative control: ambiguous baseline HTTP is unverifiable, never ✓."""
+
     def fake_get(url, headers=None, timeout=None):
         return SimpleNamespace(status_code=200 if "Authorization" in (headers or {}) else 500)
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    assert _WARN in _glyph(_probe(monkeypatch))
+    result = _probe(monkeypatch)
+    assert _WARN in _glyph(result)
+    assert _OK not in _glyph(result)
+    assert "not verified" in _detail(result).lower()
 
 
 def test_authenticated_401_still_fail_invalid_key(monkeypatch):

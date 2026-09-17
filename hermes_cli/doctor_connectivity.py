@@ -192,9 +192,10 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
     if r.status_code != 200:
         return _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
     # Some providers serve GET /models with 200 without checking the key.
-    # A second request with credentials stripped distinguishes that from a verified key.
+    # A credential-free negative control must discriminate before we emit ✓ (verified).
+    # Inability to run or interpret that control is unverifiable (⚠), never verified.
     if not url:
-        return _row(pname, "ok", label=label)
+        return _row(pname, "warn", "(could not run unauthenticated /models baseline; key not verified)", label=label)
     try:
         import httpx
         baseline_headers = {k: v for k, v in headers.items() if k.lower() not in ("authorization", "x-goog-api-key")}
