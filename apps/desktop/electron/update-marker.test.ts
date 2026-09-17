@@ -21,6 +21,7 @@ import { test } from 'vitest'
 
 import {
   isPidAlive,
+  clearUpdateMarkerIfOwned,
   markerPath,
   readLiveUpdateMarker,
   UPDATE_MARKER_MAX_AGE_MS,
@@ -152,6 +153,17 @@ test('writeUpdateMarker + dead pid => self-heals on read', () => {
   const res = readLiveUpdateMarker(home, { kill: DEAD })
   assert.equal(res, null, 'a dead-pid marker from writeUpdateMarker self-heals')
   assert.ok(!fs.existsSync(markerPath(home)), 'marker file is pruned')
+})
+
+test('clearUpdateMarkerIfOwned only clears the Desktop pre-handoff owner', () => {
+  const home = tmpHome('clear-owned')
+  writeMarker(home, process.pid, Math.floor(Date.now() / 1000))
+  clearUpdateMarkerIfOwned(home, process.pid)
+  assert.ok(!fs.existsSync(markerPath(home)))
+
+  writeMarker(home, 4242, Math.floor(Date.now() / 1000))
+  clearUpdateMarkerIfOwned(home, process.pid)
+  assert.ok(fs.existsSync(markerPath(home)), 'a detached updater marker must survive the Desktop abort path')
 })
 
 // ---------------------------------------------------------------------------

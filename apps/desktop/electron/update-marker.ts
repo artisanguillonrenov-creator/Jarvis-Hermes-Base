@@ -160,6 +160,21 @@ export function writeUpdateMarker(
   }
 }
 
+/** Remove a hand-off marker only when this process still owns it. */
+export function clearUpdateMarkerIfOwned(hermesHome, pid: number) {
+  const file = markerPath(hermesHome)
+
+  try {
+    const owner = Number.parseInt(fs.readFileSync(file, 'utf8').split('\n')[0]?.trim() || '', 10)
+
+    if (owner === pid) {
+      fs.unlinkSync(file)
+    }
+  } catch {
+    // Best-effort: never delete a marker we cannot prove belongs to us.
+  }
+}
+
 /**
  * Whether a NEW updater hand-off must be refused because a different,
  * already-alive updater currently owns the marker (#75778).

@@ -9,6 +9,7 @@ import { test } from 'vitest'
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..')
 const POSIX_SCRIPT = path.join(REPO_ROOT, 'scripts', 'desktop-update', 'posix.sh')
 const WINDOWS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'desktop-update', 'windows.ps1')
+const MAIN_PROCESS = path.join(__dirname, 'main.ts')
 
 function sandbox(tag: string) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-handoff-marker-${tag}-`))
@@ -104,4 +105,14 @@ test.skipIf(process.platform === 'win32')('POSIX hand-off preserves the Desktop 
 
 test.skipIf(process.platform !== 'win32')('PowerShell hand-off preserves the Desktop marker acquisition time', () => {
   assertScriptHandoff(runWindows)
+})
+
+test('Desktop establishes the shared update gate before backend and gateway teardown', () => {
+  const source = fs.readFileSync(MAIN_PROCESS, 'utf8')
+  const gate = source.indexOf('writeUpdateMarker(HERMES_HOME, process.pid, { startedAt: updateStartedAt })')
+  const teardown = source.indexOf('const lock = await releaseBackendLockForUpdate(updateRoot)')
+
+  assert.ok(gate >= 0, 'applyUpdates must publish a cross-process update marker')
+  assert.ok(teardown >= 0, 'applyUpdates must still use the coordinated backend/gateway teardown')
+  assert.ok(gate < teardown, 'the marker must be live before teardown can kill Kanban workers')
 })
