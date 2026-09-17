@@ -162,13 +162,13 @@ def build_write_denied_paths(home: str) -> set[str]:
     # inherits it, and the root Anthropic PKCE store is still read by default /
     # non-profile sessions when a profile is active. google_oauth.json is an OAuth
     # token store; both Bitwarden caches hold Secrets Manager material.
+    # auth.json is the Hermes auth store and must not be rewritten via file tools.
     #
-    # auth.json, auth.lock, config.yaml and webhook_subscriptions.json are
-    # deliberately NOT here: #45947 freed those control files on purpose
-    # ("true containment belongs in Docker/remote backends and OS permissions,
-    # not an expanding hardcoded denylist"). They stay read-denied, not write-denied.
+    # auth.lock, config.yaml and webhook_subscriptions.json remain read-denied but
+    # not write-denied (#45947): true containment belongs in Docker/remote backends
+    # and OS permissions, not an expanding hardcoded denylist.
     hermes_files = (
-        ".env", ".anthropic_oauth.json",
+        "auth.json", ".env", ".anthropic_oauth.json",
         os.path.join("auth", "google_oauth.json"),
         os.path.join("cache", "bws_cache.json"),
         os.path.join("cache", "bws_cache.enc.json"),
@@ -216,8 +216,9 @@ def build_write_approval_paths(home: str) -> set[str]:
 # state whose rewrite can falsify history and break resume/compression;
 # mcp-tokens/, pairing/, vault/ (key + ciphertext side by side) and
 # browser-profile/ (copied cookies / Login Data) hold credential material.
-# Control files (auth.json, config.yaml, webhook_subscriptions.json) are
-# deliberately NOT here (#45947): read-denied, but the user may ask to edit them.
+# Control files (config.yaml, webhook_subscriptions.json) are deliberately NOT
+# here (#45947): read-denied, but the user may ask to edit them. auth.json is
+# write-denied via build_write_denied_paths() instead (exact path, not basename).
 _HERMES_PROTECTED_SUBPATHS = ("state.db", "sessions", "mcp-tokens", "pairing", "vault", "browser-profile")
 
 
