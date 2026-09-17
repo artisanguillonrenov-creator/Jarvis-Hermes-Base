@@ -199,12 +199,20 @@ class GatewayNotificationsMixin:
 
     async def _resolve_async_delegation_session(
         self, session_entry: SessionEntry, pinned_session_id: str,
+        run_generation: Optional[int] = None, run_session_key: Optional[str] = None,
     ) -> Optional[SessionEntry]:
         """Resolve an async completion to its verified owning gateway session.
 
         Follow compression-rotation lineage (parent row ended, child continues), but never let a
         late completion override an unrelated /new or restored route. Unknown ownership fails
         closed; the result stays in the delegation records.
+
+        The row lookup awaits, so the route can move while it is in flight (/new, a concurrent
+        resume) and the run can be revoked (/stop). Both are re-checked against the snapshot the
+        caller resolved — at the effect, not at the first await: the store samples the run token
+        under the authority lock the bump takes, and the identity fast path validates it in the same
+        block that returns it. A pinned session identified before a boundary must not be able to
+        publish after it.
         """
         from gateway.run import _USER_BOUNDARY_END_REASONS
         session_db = cast(Any, self._session_db)
@@ -214,6 +222,14 @@ class GatewayNotificationsMixin:
                 "dropping injection (#55578 fail-closed)."
             )
             return None
+        # Snapshot the run token before the await. Callers that know the turn's own generation
+        # pass it; otherwise the key's current value stands in, so a revocation landing during the
+        # lookup still changes it.
+        generation_key = run_session_key or session_entry.session_key
+        expected_generation = (
+            run_generation if run_generation is not None
+            else self._current_session_run_generation(generation_key)
+        )
         pinned_row = None
         try:
             pinned_row = await session_db.get_session(pinned_session_id)
@@ -237,33 +253,58 @@ class GatewayNotificationsMixin:
                 )
                 return None
             if _end_reason != "compression":
-                # Idle/timeout end (scale-to-zero norm): the chat route is still valid, so deliver to its
-                # current session rather than drop (the row would be acked then silently lost).
+                # Idle/timeout end (scale-to-zero norm): the chat route is still valid, so deliver
+                # to its current session rather than drop (the row would be acked then lost).
                 logger.info(
                     "Async-delegation completion pinned to %s-ended session %s; "
                     "retargeting to the chat's current session %s.",
                     _end_reason or "idle", pinned_session_id, session_entry.session_id,
                 )
-                return session_entry
-            follows_compression = True
-            target_session_id = await self._resolve_compression_lineage_target(
-                session_db, session_entry, pinned_session_id,
-            )
-            if target_session_id is None:
-                return None
+                target_session_id = session_entry.session_id
+            else:
+                follows_compression = True
+                target_session_id = await self._resolve_compression_lineage_target(
+                    session_db, session_entry, pinned_session_id,
+                )
+                if target_session_id is None:
+                    return None
+
+        # Every await is behind us. The run token is re-validated AT the effect: the store samples
+        # ``_still_authorized`` under the same authority lock that the generation bump takes, so a
+        # /stop or /new landing while this completion commits is observed rather than outrun.
+        # Validating here and then committing through an offloaded call would leave exactly that
+        # window, and a routing transition is offloaded because it rewrites the whole index.
+        def _still_authorized() -> bool:
+            return self._is_session_run_current(generation_key, expected_generation)
+
         if target_session_id == session_entry.session_id:
+            # Nothing to move: the effect is the entry handed back for injection, and no await
+            # separates this validation from that return.
+            if not _still_authorized():
+                logger.warning(
+                    "Async-delegation completion for %s was revoked while resolving pinned session "
+                    "%s; dropping injection instead of publishing it.", generation_key,
+                    pinned_session_id,
+                )
+                return None
             return session_entry
+
         prior_session_id = session_entry.session_id
         if follows_compression:
             switched = await self.async_session_store.advance_compression_session(
                 session_entry.session_key, prior_session_id, target_session_id,
+                authorize=_still_authorized,
             )
         else:
-            switched = await self.async_session_store.switch_session(session_entry.session_key, target_session_id)
+            switched = await self.async_session_store.switch_session_if_current(
+                session_entry.session_key, prior_session_id, target_session_id,
+                authorize=_still_authorized,
+            )
         if switched is None:
             logger.warning(
-                "Async-delegation completion could not bind routing key %s to "
-                "owning session %s; dropping injection.", session_entry.session_key, target_session_id,
+                "Async-delegation completion could not bind routing key %s to owning session %s "
+                "(route moved, run revoked, or no authorization); dropping injection.",
+                session_entry.session_key, target_session_id,
             )
             return None
         logger.info(
