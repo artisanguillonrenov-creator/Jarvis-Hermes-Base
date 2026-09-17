@@ -34,6 +34,23 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None) -> subprocess
         errors="replace", timeout=TURN_ATTEMPT_TIMEOUT_SECONDS, env=env)
 
 
+def _delivery_failure_reason(error: BaseException) -> str:
+    """The typed reason for a refusal, kept inside the documented vocabulary.
+
+    An exception's own ``reason`` is trusted only when it names a real code: ``TurnBusyError``
+    carries ``target_busy``, but ``reason`` is also a stdlib attribute on ``ssl.SSLError`` and
+    ``urllib.error.URLError``, and forwarding one of those would put free text where consumers
+    expect a closed set. Anything else is classified like every other failure.
+    """
+    from tools.bot_failure_reasons import ALL_REASONS, classify_agent_error
+
+    # 'target_busy' extends the structured refusal enum and predates ALL_REASONS.
+    supplied = str(getattr(error, "reason", "") or "").strip()
+    if supplied == "target_busy" or supplied in ALL_REASONS:
+        return supplied
+    return classify_agent_error(str(error))
+
+
 @method("bot_relay.roster.sync")
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
@@ -57,7 +74,8 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 
 @method("bot_relay.deliver")
-def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
+def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
+      _failure_reason=_delivery_failure_reason) -> dict:
     """Deliver a relayed DM (``profile``, attribution-prefixed ``message``) into a Bot Chat ON THIS
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
@@ -156,10 +174,14 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
         reply = _bot_mode_delivery_text((proc.stdout or "").strip(), successful=True)
         return _ok(rid, {"reply": reply})
     except subprocess.TimeoutExpired:
-        return _err(rid, 5093, "delivery turn timed out")
+        # Every classified refusal has to ride `data.reason`: the Desktop forwards only that field,
+        # and the sender re-classifies from free text, which cannot name these. This branch is also
+        # `delivery_timeout`'s only producer.
+        from tools.bot_failure_reasons import DELIVERY_TIMEOUT
+        return _err(rid, 5093, "delivery turn timed out", data={"reason": DELIVERY_TIMEOUT})
     except Exception as e:
-        # 'target_busy' extends the structured refusal enum.
-        return _err(rid, 5096 if getattr(e, "reason", "") == "target_busy" else 5094, str(e))
+        reason = _failure_reason(e)
+        return _err(rid, 5096 if reason == "target_busy" else 5094, str(e), data={"reason": reason})
 
 
 @method("bot_relay.reply")
