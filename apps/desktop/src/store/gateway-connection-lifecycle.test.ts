@@ -769,7 +769,7 @@ describe('cooperative pool retirement (supersedes #104871)', () => {
     const { requestGatewayForAgent } = await import('./gateway')
     const parkedDials = getConnectionFor.mock.calls.length
     await expect(openGatewayForAgent('local', 'bot-a')).rejects.toThrow(/retired/i)
-    await expect(requestGatewayForAgent('local', 'bot-a', 'session.list')).rejects.toThrow(/retired/i)
+    await expect(requestGatewayForAgent('local', 'bot-a', 'session.list', {})).rejects.toThrow(/retired/i)
     await expect(retainGatewayForAgent('local', 'bot-a')).rejects.toThrow(/retired/i)
     expect(getConnectionFor.mock.calls.length).toBe(parkedDials)
 

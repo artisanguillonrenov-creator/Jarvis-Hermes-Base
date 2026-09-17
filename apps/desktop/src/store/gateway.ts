@@ -1081,9 +1081,10 @@ export function requestGatewayForProfileUntyped(
   method: string,
   params: Record<string, JsonValue>,
   timeoutMs?: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
 ): Promise<JsonValue> {
-  return callGatewayForProfile(profile, untypedCall(method, params, timeoutMs, signal))
+  return callGatewayForProfile(profile, untypedCall(method, params, timeoutMs, signal), spawnPriority)
 }
 
 /**
