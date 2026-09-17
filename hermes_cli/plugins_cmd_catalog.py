@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from hermes_cli.plugin_catalog import (
     PluginCatalogEntry, entry_capability_summary, filter_entries, find_removed, get_live_catalog_entry,
-    load_catalog_live, load_removed_list, _NAME_RE,
+    live_removed_list, load_catalog_live, load_removed_list, _NAME_RE,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,14 +93,27 @@ def catalog_annotation(dir_path) -> Optional[str]:
     return f"catalog:{sidecar.get('tier') or 'community'}@{str(sidecar.get('sha') or '')[:8]}"
 
 
-def removed_annotation(name: str, dir_path) -> Optional[str]:
+def removed_annotation(name: str, dir_path, *, removed_entries=None) -> Optional[str]:
     """Kill-list reason when an INSTALLED plugin matches by name, catalog name or repo, else ``None``."""
     sidecar = read_catalog_sidecar(dir_path) or {}
+    removed_entries = removed_entries if removed_entries is not None else load_removed_list() + live_removed_list()
     for candidate in (name, sidecar.get("catalog_name"), sidecar.get("repo")):
-        removed = find_removed(str(candidate)) if candidate else None
+        removed = next((entry for entry in removed_entries if candidate and (
+            str(candidate) == entry.name or (entry.repo and _normalized_repos_match(str(candidate), entry.repo)))), None)
         if removed is not None:
             return removed.reason or "no reason recorded"
     return None
+
+
+def _normalized_repos_match(candidate: str, repo: str) -> bool:
+    from hermes_cli.plugin_catalog import _normalize_repo
+    return _normalize_repo(candidate) == _normalize_repo(repo)
+
+
+def removed_annotations(rows) -> List[Optional[str]]:
+    """Removal annotations for list rows, sharing one live-catalog lookup per invocation."""
+    removed_entries = load_removed_list() + live_removed_list()
+    return [removed_annotation(name, dir_path, removed_entries=removed_entries) for name, dir_path in rows]
 
 
 # ── Catalog-aware install / update ───────────────────────────────────────────
