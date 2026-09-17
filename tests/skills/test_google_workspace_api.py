@@ -313,7 +313,7 @@ def test_contacts_birthdays_name_filter_and_leap_day(api_module, monkeypatch, ca
     monkeypatch.setattr(
         api_module,
         "_people_connections_page",
-        lambda page_token=None: {
+        lambda page_token=None, **kwargs: {
             "connections": [
                 {"names": [{"displayName": "Ada Lovelace"}], "birthdays": [{"date": {"month": 2, "day": 29, "year": 1815}}]},
                 {"names": [{"displayName": "Grace Hopper"}], "birthdays": [{"date": {"month": 12, "day": 9}}]},
@@ -360,10 +360,57 @@ def test_contacts_birthdays_uses_python_people_client(api_module, monkeypatch, c
 
 
 def test_contacts_birthdays_returns_empty_list_for_no_connections(api_module, monkeypatch, capsys):
-    monkeypatch.setattr(api_module, "_people_connections_page", lambda page_token=None: {})
+    monkeypatch.setattr(api_module, "_people_connections_page", lambda page_token=None, **kwargs: {})
 
     api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=100, name=""))
 
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_contacts_birthdays_ignores_invalid_age_year(api_module, monkeypatch, capsys):
+    monkeypatch.setattr(
+        api_module,
+        "_people_connections_page",
+        lambda page_token=None, **kwargs: {"connections": [
+            {"names": [{"displayName": "Ada"}], "birthdays": [{"date": {"month": 3, "day": 2, "year": "unknown"}}]},
+        ]},
+    )
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=100, name=""))
+
+    assert json.loads(capsys.readouterr().out) == [{
+        "name": "Ada", "birthday": "02.03.unknown", "nextDate": "2025-03-02", "daysUntil": 1
+    }]
+
+
+def test_contacts_birthdays_uses_the_first_nonempty_display_name(api_module, monkeypatch, capsys):
+    monkeypatch.setattr(
+        api_module,
+        "_people_connections_page",
+        lambda page_token=None, **kwargs: {"connections": [
+            {"names": [{"displayName": "  "}, {"displayName": "Ada"}], "birthdays": [{"date": {"month": 3, "day": 2}}]},
+        ]},
+    )
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=100, name=""))
+
+    assert json.loads(capsys.readouterr().out)[0]["name"] == "Ada"
+
+
+def test_contacts_birthdays_detects_the_backend_once_for_all_pages(api_module, monkeypatch, capsys):
+    calls = []
+    pages = [
+        {"connections": [], "nextPageToken": "next"},
+        {"connections": []},
+    ]
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: calls.append("detected") or "/usr/bin/gws")
+    monkeypatch.setattr(api_module, "_run_gws", lambda *args, **kwargs: pages.pop(0))
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=100, name=""))
+
+    assert calls == ["detected"]
     assert json.loads(capsys.readouterr().out) == []
 
 
@@ -377,3 +424,9 @@ def test_contacts_birthdays_parser_wires_horizon_limit_and_name(api_module, monk
     assert captured["days"] == 7
     assert captured["max"] == 3
     assert captured["name"] == "Ada"
+
+
+def test_contacts_birthdays_rejects_non_positive_max(api_module):
+    with patch.object(sys, "argv", ["google_api.py", "contacts", "birthdays", "--max", "0"]):
+        with pytest.raises(SystemExit):
+            api_module.main()

@@ -264,7 +264,8 @@ $GAPI contacts birthdays --name "Ada"
 For birthday questions, use `contacts birthdays` rather than searching for a
 Calendar named "Birthdays". Google Calendar's UI Birthdays calendar is not
 always exposed through CalendarList or regular event queries. Feb 29 birthdays
-are observed on Feb 28 in non-leap years.
+are observed on Feb 28 in non-leap years. Birthday values use `DD.MM.YYYY`; a
+contact without a birth year is represented as `DD.MM.` and has no `turningAge`.
 
 ### Sheets
 

@@ -915,7 +915,7 @@ def _today() -> date:
     return date.today()
 
 
-def _people_connections_page(page_token: str | None = None) -> dict:
+def _people_connections_page(page_token: str | None = None, *, gws_binary: str | None = None) -> dict:
     """Fetch one People API connections page through the active backend."""
     params = {
         "resourceName": "people/me",
@@ -924,7 +924,9 @@ def _people_connections_page(page_token: str | None = None) -> dict:
     }
     if page_token:
         params["pageToken"] = page_token
-    if _gws_binary():
+    if gws_binary is None:
+        gws_binary = _gws_binary()
+    if gws_binary:
         return _run_gws(["people", "people", "connections", "list"], params=params)
     service = build_service("people", "v1")
     return service.people().connections().list(**params).execute()
@@ -946,6 +948,24 @@ def _format_birthday(value: dict) -> str:
     return f"{value['day']:02d}.{value['month']:02d}.{suffix}"
 
 
+def _contact_display_name(person: dict) -> str:
+    """Return the first usable People display name without trusting sparse rows."""
+    for item in person.get("names", []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("displayName")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return ""
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _next_birthday(value: dict, today: date) -> date:
     upcoming = _birthday_date(value, today.year)
     return upcoming if upcoming >= today else _birthday_date(value, today.year + 1)
@@ -957,12 +977,12 @@ def contacts_birthdays(args):
     page_token = None
     birthdays = []
     name_filter = args.name.casefold()
+    gws_binary = _gws_binary()
 
     while True:
-        page = _people_connections_page(page_token)
+        page = _people_connections_page(page_token, gws_binary=gws_binary)
         for person in page.get("connections", []):
-            names = person.get("names", [])
-            name = names[0].get("displayName", "") if names else ""
+            name = _contact_display_name(person)
             if name_filter and name_filter not in name.casefold():
                 continue
             for birthday in person.get("birthdays", []):
@@ -982,8 +1002,9 @@ def contacts_birthdays(args):
                     "nextDate": next_date.isoformat(),
                     "daysUntil": days_until,
                 }
-                if value.get("year"):
-                    entry["turningAge"] = next_date.year - value["year"]
+                year = value.get("year")
+                if isinstance(year, int) and not isinstance(year, bool):
+                    entry["turningAge"] = next_date.year - year
                 birthdays.append(entry)
         page_token = page.get("nextPageToken")
         if not page_token:
@@ -1241,7 +1262,7 @@ def main():
 
     p = gmail_sub.add_parser("search")
     p.add_argument("query", help="Gmail search query (e.g. 'is:unread')")
-    p.add_argument("--max", type=int, default=10)
+    p.add_argument("--max", type=_positive_int, default=10)
     p.set_defaults(func=gmail_search)
 
     p = gmail_sub.add_parser("get")
@@ -1280,7 +1301,7 @@ def main():
     p = cal_sub.add_parser("list")
     p.add_argument("--start", default="", help="Start time (ISO 8601)")
     p.add_argument("--end", default="", help="End time (ISO 8601)")
-    p.add_argument("--max", type=int, default=25)
+    p.add_argument("--max", type=_positive_int, default=25)
     p.add_argument("--calendar", default="primary")
     p.set_defaults(func=calendar_list)
 
@@ -1305,7 +1326,7 @@ def main():
 
     p = drv_sub.add_parser("search")
     p.add_argument("query")
-    p.add_argument("--max", type=int, default=10)
+    p.add_argument("--max", type=_positive_int, default=10)
     p.add_argument("--raw-query", action="store_true", help="Use query as raw Drive API query")
     p.set_defaults(func=drive_search)
 
@@ -1350,12 +1371,12 @@ def main():
     con_sub = con.add_subparsers(dest="action", required=True)
 
     p = con_sub.add_parser("list")
-    p.add_argument("--max", type=int, default=50)
+    p.add_argument("--max", type=_positive_int, default=50)
     p.set_defaults(func=contacts_list)
 
     p = con_sub.add_parser("birthdays", help="List upcoming contact birthdays from People API")
     p.add_argument("--days", type=int, default=30, help="Include birthdays in the next N days")
-    p.add_argument("--max", type=int, default=100, help="Maximum results to return")
+    p.add_argument("--max", type=_positive_int, default=100, help="Maximum results to return (at least 1)")
     p.add_argument("--name", default="", help="Only include contacts whose name contains this text")
     p.set_defaults(func=contacts_birthdays)
 
