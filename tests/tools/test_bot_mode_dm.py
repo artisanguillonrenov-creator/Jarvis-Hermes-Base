@@ -1021,3 +1021,15 @@ def test_relay_waiter_that_cannot_start_reports_queued_not_failed(tmp_path, monk
     assert "Do NOT resend" in result["detail"]
     assert "approval" in result["notification_error"]
     assert list((bot_relay.relay_root(root) / bot_relay.OUTBOX_DIR).glob("*.json")), "envelope still queued"
+
+
+def test_a_private_teammate_is_neither_addressable_nor_listed(tmp_path):
+    """message_agent answers a private target the way it answers a name that does not exist."""
+    home = _managed_home(tmp_path, teammates=("researcher", "lucky"))
+    with open(home / "profiles" / "lucky" / "profile.yaml", "a", encoding="utf-8") as fh:
+        fh.write("    private: true\n")
+
+    result = json.loads(bot_mode_dm.message_agent_tool(target="@lucky", message="hi", agent=_FakeAgent(home)))
+
+    assert "error" in result
+    assert result["teammates"] == ["researcher"]
