@@ -183,8 +183,41 @@ def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
 
     assert exit_codes == [75]
     write_status.assert_called_once_with(
-        gateway_state="degraded", exit_reason="loop_liveness_watchdog"
+        gateway_state="degraded",
+        exit_reason="loop_liveness_watchdog",
+        restart_requested=True,
     )
+
+
+def test_loop_liveness_watchdog_restores_terminal_status_after_diagnostics():
+    """A late loop status update cannot erase the watchdog's terminal record."""
+    loop = MagicMock(spec=asyncio.AbstractEventLoop)
+    hard_exit_called = threading.Event()
+    handle_ref = {}
+
+    def fake_exit(_code: int) -> None:
+        handle_ref["handle"].stop()
+        hard_exit_called.set()
+
+    with (
+        patch("gateway.shutdown_watchdog.os._exit", side_effect=fake_exit),
+        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback") as dump,
+        patch("gateway.status.write_runtime_status") as write_status,
+    ):
+        dump.side_effect = lambda **_kwargs: write_status(gateway_state="running")
+        handle = start_loop_liveness_watchdog(
+            loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=1
+        )
+        assert handle is not None
+        handle_ref["handle"] = handle
+        assert hard_exit_called.wait(timeout=2.0)
+        handle.join(timeout=2.0)
+
+    assert write_status.call_args_list[-1].kwargs == {
+        "gateway_state": "degraded",
+        "exit_reason": "loop_liveness_watchdog",
+        "restart_requested": True,
+    }
 
 
 def test_gateway_config_loop_watchdog_round_trip():
