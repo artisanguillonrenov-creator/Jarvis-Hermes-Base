@@ -199,11 +199,39 @@ def test_xai_available_uses_oauth_credential_resolver(monkeypatch):
     import types
 
     fake = types.ModuleType("tools.xai_http")
-    fake.resolve_xai_http_credentials = lambda: {"api_key": "xai-key"}
+    fake.resolve_xai_http_credentials = lambda **kwargs: {"api_key": "xai-key"}
     monkeypatch.setitem(sys.modules, "tools.xai_http", fake)
     assert ts.XAIStreamer.available() is True
-    fake.resolve_xai_http_credentials = lambda: {"api_key": ""}
+    fake.resolve_xai_http_credentials = lambda **kwargs: {"api_key": ""}
     assert ts.XAIStreamer.available() is False
+
+
+def test_xai_streaming_prefers_api_key_over_oauth(monkeypatch):
+    """Streaming TTS must prefer XAI_API_KEY (metered) over OAuth bearer.
+
+    The sync path (_generate_xai_tts) passes prefer_api_key=True because
+    the subscription OAuth authorizes chat but 403s on /v1/tts. The
+    streaming path was missed when that fix landed — both XAIStreamer.available()
+    and _async_frames must use the same credential ordering.
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("tools.xai_http")
+    calls = []
+
+    def _fake_resolve(*, prefer_api_key=False, **kwargs):
+        calls.append(prefer_api_key)
+        # Simulate: OAuth-only would have no api_key, prefer_api_key returns it
+        if prefer_api_key:
+            return {"api_key": "xai-key"}
+        return {"api_key": ""}  # OAuth bearer has no api_key field
+
+    fake.resolve_xai_http_credentials = _fake_resolve
+    monkeypatch.setitem(sys.modules, "tools.xai_http", fake)
+
+    assert ts.XAIStreamer.available() is True
+    assert calls == [True], f"available() must pass prefer_api_key=True, got {calls}"
 
 
 # ── Gemini SSE parsing ────────────────────────────────────────────────────
