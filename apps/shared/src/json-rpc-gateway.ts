@@ -109,6 +109,8 @@ export class JsonRpcGatewayClient {
   private lastSeenSeq = new Map<string, number>()
   /** Set while a post-reconnect replay fetch is in flight (dedup guard). */
   private replayInFlight = false
+  /** Invalidates an interrupted replay so its async cleanup cannot own a replacement socket. */
+  private replayGeneration = 0
   /**
    * While a replay fetch is in flight, live seq'd frames for the sessions
    * being replayed are parked here instead of dispatching immediately.
@@ -438,6 +440,7 @@ export class JsonRpcGatewayClient {
     }
 
     this.replayInFlight = true
+    const replayGeneration = ++this.replayGeneration
     // Park live frames for the sessions we're about to replay so a frame
     // racing the replay response can't dispatch ahead of (or duplicate) the
     // gap events. Sessions without watermarks are unaffected.
@@ -463,6 +466,13 @@ export class JsonRpcGatewayClient {
           )
         )
       )
+
+      // The socket that owned this replay was dropped while its requests were
+      // settling. Its results and cleanup must not consume the replacement
+      // socket's replay window.
+      if (this.replayGeneration !== replayGeneration) {
+        return
+      }
 
       for (const result of results) {
         if (result.status !== 'fulfilled' || !Array.isArray(result.value?.events)) {
@@ -495,8 +505,10 @@ export class JsonRpcGatewayClient {
     } catch {
       // Replay is an optimization over lossy-reconnect; never surface errors.
     } finally {
-      this.flushReplayHold()
-      this.replayInFlight = false
+      if (this.replayGeneration === replayGeneration) {
+        this.flushReplayHold()
+        this.replayInFlight = false
+      }
     }
   }
 
@@ -556,6 +568,12 @@ export class JsonRpcGatewayClient {
 
   /** Forget the current socket generation, fail its calls, and go 'closed'. */
   private dropSocket(error: Error): void {
+    // A replay belongs to the socket that started it. Detaching that socket
+    // rejects its requests asynchronously, so clear its ownership now; the
+    // next open can immediately schedule a replay of its own.
+    this.replayGeneration += 1
+    this.replayInFlight = false
+    this.replayHold = null
     this.socket = null
     this.channel.detach(error)
     this.setState('closed')
