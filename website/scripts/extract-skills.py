@@ -160,6 +160,15 @@ def _docs_page_path(rel_dir: str, source_label: str) -> str:
     return ""
 
 
+def _canonical_install_identifier(source: str, identifier: str) -> str:
+    """Return the exact identifier accepted by the install resolver."""
+    if not identifier:
+        return ""
+    if source.lower() == "clawhub" and not identifier.startswith("clawhub/"):
+        return f"clawhub/{identifier}"
+    return identifier
+
+
 def _install_command(source: str, identifier: str, name: str) -> str:
     """Build the ``hermes skills install …`` command for a unified-index entry.
 
@@ -168,6 +177,7 @@ def _install_command(source: str, identifier: str, name: str) -> str:
     """
     if not identifier:
         return f"hermes skills install {name}"
+    identifier = _canonical_install_identifier(source, identifier)
     src = source.lower()
     if src in {"official", "built-in", "optional"}:
         # OptionalSkillSource emits identifiers like "official/security/1password"
@@ -176,7 +186,7 @@ def _install_command(source: str, identifier: str, name: str) -> str:
         # Already wrapped as "skills-sh/owner/repo/skill" by the source
         return f"hermes skills install {identifier}"
     if src == "clawhub":
-        return f"hermes skills install clawhub/{identifier}"
+        return f"hermes skills install {identifier}"
     if src == "browse-sh":
         # Identifier already includes the "browse-sh/" prefix from BrowseShSource
         return f"hermes skills install {identifier}"
@@ -422,6 +432,7 @@ def extract_unified_index_skills():
             if repo:
                 author = repo.split("/")[0]
 
+        identifier = _canonical_install_identifier(source_id, identifier)
         install_cmd = _install_command(source_id, identifier, name)
         source_url = _source_url(source_id, identifier, extra)
 
