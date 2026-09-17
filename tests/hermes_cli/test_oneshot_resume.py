@@ -266,3 +266,56 @@ class TestRunOneshotForwardsResume:
         assert rc == 0
         assert captured["prompt"] == "hello"
         assert captured["resume"] == "sess-1"
+
+
+@pytest.mark.parametrize(("explicit_source", "expected_source"), [(None, "tool"), ("custom", "custom")])
+def test_top_level_oneshot_persists_tool_source_outside_tui_sessions(
+    monkeypatch, tmp_path, explicit_source, expected_source,
+):
+    """Regression for #112550: finite top-level runs never inherit a TUI source."""
+    import hermes_cli.oneshot as oneshot_mod
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from run_agent import _session_source_for_agent
+
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            self.platform = kwargs["platform"]
+            self.session_id = "top-level-oneshot"
+            self._session_db = kwargs["session_db"]
+
+        def __setattr__(self, name, value):
+            object.__setattr__(self, name, value)
+
+        def run_conversation(self, _prompt, conversation_history=None):
+            self._session_db.create_session(
+                session_id=self.session_id,
+                source=_session_source_for_agent(self.platform),
+            )
+            return {"final_response": "ok"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: db)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "test", "provider": "custom"}})
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kw: {"api_key": None, "base_url": None, "provider": "custom",
+                       "requested_provider": "custom", "api_mode": "chat", "credential_pool": None},
+    )
+    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
+    monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
+    monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
+    tokens = set_session_vars(source="tui")
+    try:
+        oneshot_mod._run_agent("hello", session_source=explicit_source)
+        persisted = SessionDB(db_path=db_path)
+        try:
+            assert persisted.get_session("top-level-oneshot")["source"] == expected_source
+        finally:
+            persisted.close()
+    finally:
+        clear_session_vars(tokens)
