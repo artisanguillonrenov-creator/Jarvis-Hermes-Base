@@ -1793,18 +1793,34 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect($notifications.get()).toHaveLength(0)
   })
 
-  it('a backend exit after boot toasts a Restart that raises the shell restart intent', async () => {
+  it('a backend exit after boot immediately raises the shell restart intent and keeps a manual Restart toast', async () => {
     render(<Harness />)
     await flushAsync()
     expect($desktopBoot.get().visible).toBe(false)
 
-    const before = $backendRestartRequest.get()
+    const before = $backendRestartRequest.get().seq
     act(() => backendExit?.({ code: 1 }))
 
+    expect($backendRestartRequest.get()).toEqual({ seq: before + 1, profile: 'default' })
     const toast = $notifications.get().find(entry => entry.kind === 'error')
     expect(toast?.action).toBeTruthy()
     toast?.action?.onClick()
-    expect($backendRestartRequest.get()).toBe(before + 1)
+    expect($backendRestartRequest.get().seq).toBe(before + 2)
+  })
+
+  it('a backend exit during a connection replacement does not restart or disturb the replacement', async () => {
+    render(<Harness />)
+    await flushAsync()
+    const before = $backendRestartRequest.get().seq
+    $gatewaySwitching.set(true)
+
+    try {
+      act(() => backendExit?.({ code: 1 }))
+      expect($backendRestartRequest.get().seq).toBe(before)
+      expect($notifications.get()).toHaveLength(0)
+    } finally {
+      $gatewaySwitching.set(false)
+    }
   })
 
   it('seeds the configured default project dir pre-connect — no route-resume race (#71873)', async () => {

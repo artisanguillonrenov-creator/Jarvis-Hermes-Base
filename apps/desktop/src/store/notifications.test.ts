@@ -62,13 +62,13 @@ test('structured storage_* error codes route to Maintenance', () => {
 })
 
 test('405 method-not-allowed toasts a restart in plain words with a Restart Hermes action', () => {
-  const before = $backendRestartRequest.get()
+  const before = $backendRestartRequest.get().seq
   notifyError(new Error('405 Method Not Allowed'), 'Request failed')
 
   expect(lastMessage()).not.toMatch(/405|Method Not Allowed|backend/i)
   expect($notifications.get()[0]?.action?.label).toBe(en.notifications.actions.restartHermes)
   $notifications.get()[0]?.action?.onClick()
-  expect($backendRestartRequest.get()).toBe(before + 1)
+  expect($backendRestartRequest.get().seq).toBe(before + 1)
 })
 
 test('disk-full / ENOSPC errors toast a free-space message', () => {
@@ -104,8 +104,8 @@ test('code-skew 503 unwraps to a restart-required summary, not raw IPC JSON', ()
 
   expect(lastMessage()).toMatch(/still running the old version/i)
   expect(lastMessage()).not.toMatch(/hermes:api|systemctl|backend/i)
-  const before = $backendRestartRequest.get()
+  const before = $backendRestartRequest.get().seq
   expect($notifications.get()[0]?.action?.label).toBe(en.notifications.actions.restartHermes)
   $notifications.get()[0]?.action?.onClick()
-  expect($backendRestartRequest.get()).toBe(before + 1)
+  expect($backendRestartRequest.get().seq).toBe(before + 1)
 })

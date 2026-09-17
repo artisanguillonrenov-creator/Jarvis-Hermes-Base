@@ -237,13 +237,20 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // only meaningful "restart" is re-dialing the connection.
   // eslint-disable-next-line no-restricted-syntax -- one-shot request-seen sentinel, not an atom mirror
   useEffect(() => {
-    if (backendRestartRequest === backendRestartSeenRef.current) {
+    if (backendRestartRequest.seq === backendRestartSeenRef.current) {
       return
     }
 
-    backendRestartSeenRef.current = backendRestartRequest
+    backendRestartSeenRef.current = backendRestartRequest.seq
 
-    if (backendRestartRequest > 0) {
+    if (backendRestartRequest.seq > 0) {
+      if (backendRestartRequest.profile) {
+        void window.hermesDesktop?.recycleBackend?.(backendRestartRequest.profile).catch(err =>
+          notifyError(err, translateNow('notifications.errors.restartHermesFailed'))
+        )
+
+        return
+      }
       if ($connection.get()?.mode === 'remote') {
         void reconnectGateway().catch(err => notifyError(err, translateNow('notifications.errors.restartHermesFailed')))
 

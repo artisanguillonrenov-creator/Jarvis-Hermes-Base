@@ -27,9 +27,9 @@ export function requestRoute(path: string): void {
   $routeRequest.set({ seq: routeSeq, path })
 }
 
-/** Restart the local Hermes service for the profile currently in view. */
-export const $backendRestartRequest = atom(0)
+/** Restart the local Hermes service, optionally pinning a specific profile. */
+export const $backendRestartRequest = atom<{ seq: number; profile?: string }>({ seq: 0 })
 
-export function requestBackendRestart(): void {
-  $backendRestartRequest.set($backendRestartRequest.get() + 1)
+export function requestBackendRestart(profile?: string): void {
+  $backendRestartRequest.set({ seq: $backendRestartRequest.get().seq + 1, profile })
 }
