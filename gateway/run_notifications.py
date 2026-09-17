@@ -199,6 +199,7 @@ class GatewayNotificationsMixin:
 
     async def _resolve_async_delegation_session(
         self, session_entry: SessionEntry, pinned_session_id: str,
+        *, run_generation: Optional[int] = None,
     ) -> Optional[SessionEntry]:
         """Resolve an async completion to its verified owning gateway session.
 
@@ -223,6 +224,18 @@ class GatewayNotificationsMixin:
             logger.warning(
                 "Async-delegation completion has unknown spawning session %s; "
                 "dropping injection (#55578 fail-closed).", pinned_session_id,
+            )
+            return None
+        # A /stop or /new may revoke the active turn while the session-store
+        # lookup above is offloaded. That boundary intentionally does not
+        # have to replace the route, so a session-id CAS alone cannot see it.
+        if run_generation is not None and not self._is_session_run_current(
+            session_entry.session_key, run_generation
+        ):
+            logger.warning(
+                "Async-delegation completion lost run generation %s for routing key %s; "
+                "dropping injection.",
+                run_generation, session_entry.session_key,
             )
             return None
         target_session_id = pinned_session_id

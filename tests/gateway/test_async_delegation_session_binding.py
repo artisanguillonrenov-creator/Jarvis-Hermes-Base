@@ -155,6 +155,25 @@ class TestGatewayPinningFailsClosed:
         )
 
     @pytest.mark.asyncio
+    async def test_revoked_run_generation_does_not_repin_unchanged_route(self):
+        """/stop can revoke a turn without changing its routing entry."""
+        current = self._entry("sess_current")
+        pinned = self._entry("sess_live")
+        runner = self._make_runner(
+            {"sess_live": {"id": "sess_live", "ended_at": None}},
+            switched_entry=pinned,
+        )
+        runner._is_session_run_current = MagicMock(return_value=False)
+
+        resolved = await runner._resolve_async_delegation_session(
+            current, "sess_live", run_generation=41,
+        )
+
+        assert resolved is None
+        runner._is_session_run_current.assert_called_once_with(current.session_key, 41)
+        getattr(runner.session_store, "switch_session_if_current").assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_non_compression_ended_parent_drops(self):
         current = self._entry("sess_old")
         runner = self._make_runner(

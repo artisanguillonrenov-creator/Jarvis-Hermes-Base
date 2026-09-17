@@ -320,7 +320,7 @@ class GatewayTurnMixin:
         except Exception:
             return False
 
-    async def _hmwa_resolve_session(self, event, source):
+    async def _hmwa_resolve_session(self, event, source, run_generation: int | None = None):
         """Resolve ``source`` to its session entry (topic recovery, internal-route guards, Telegram
         topic-binding heal). Returns ``(source, session_entry, session_key)`` or ``None`` to drop
         the event."""
@@ -366,7 +366,9 @@ class GatewayTurnMixin:
             )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
-            resolved_entry = await self._resolve_async_delegation_session(session_entry, pinned_session_id)
+            resolved_entry = await self._resolve_async_delegation_session(
+                session_entry, pinned_session_id, run_generation=run_generation,
+            )
             if resolved_entry is None:
                 return
             session_entry = resolved_entry
@@ -2062,7 +2064,7 @@ class GatewayTurnMixin:
             (getattr(event, "reply_to_text", None) or "")[:80].replace("\n", " "),
         )
 
-        resolved = await self._hmwa_resolve_session(event, source)
+        resolved = await self._hmwa_resolve_session(event, source, run_generation)
         if resolved is None:
             return
         source, session_entry, session_key = resolved
