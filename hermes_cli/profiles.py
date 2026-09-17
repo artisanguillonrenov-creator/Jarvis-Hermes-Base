@@ -10,7 +10,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -649,11 +651,13 @@ def _served_by_running_multiplexer(profile_name: str) -> bool:
 
 # In-process skill-count cache. ``rglob("SKILL.md")`` walks every skill's sub-trees; the
 # default profile alone has ~270 skills and ``list_profiles`` counts EVERY profile (16+), so
-# an uncached scan costs ~6s — enough for the desktop's per-request calls to time out and
-# the sidebar to render "全部智能体 0". Keyed by skills dir, invalidated when the tree
-# signature changes (skill add/remove) or after a short TTL (deep edits).
-_SKILL_COUNT_CACHE: dict[str, tuple[float, float, int]] = {}
-_SKILL_COUNT_TTL_SECONDS = 30.0
+# an uncached scan costs ~6s. ``/api/profiles`` and ``profiles.list`` are polled, therefore
+# expiry must not schedule that recursive walk again while a profile is idle. The signature
+# covers the skills root and categories, which changes when skills are added or removed. The
+# cache is bounded so short-lived/custom profile roots cannot grow it without limit.
+_SKILL_COUNT_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
+_SKILL_COUNT_CACHE_MAX_ENTRIES = 128
+_SKILL_COUNT_CACHE_LOCK = threading.Lock()
 
 
 def _skills_dir_signature(skills_dir: Path) -> float:
@@ -677,19 +681,25 @@ def _skills_dir_signature(skills_dir: Path) -> float:
 
 
 def _count_skills(profile_dir: Path) -> int:
-    """Count installed skills in a profile (cached by skills-dir signature)."""
+    """Count installed skills in a profile (bounded, signature-invalidated cache)."""
     skills_dir = profile_dir / "skills"
     if not skills_dir.is_dir():
         return 0
     key = str(skills_dir)
     signature = _skills_dir_signature(skills_dir)
-    now = time.time()
-    cached = _SKILL_COUNT_CACHE.get(key)
-    if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS:
-        return cached[2]
-    count = sum(1 for md in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(md))
-    _SKILL_COUNT_CACHE[key] = (signature, now, count)
-    return count
+    # Hold the lock through the cold scan: otherwise a poll burst observes the same cache miss
+    # in every worker and recursively walks the same skill tree N times.
+    with _SKILL_COUNT_CACHE_LOCK:
+        cached = _SKILL_COUNT_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            _SKILL_COUNT_CACHE.move_to_end(key)
+            return cached[1]
+        count = sum(1 for md in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(md))
+        _SKILL_COUNT_CACHE[key] = (signature, count)
+        _SKILL_COUNT_CACHE.move_to_end(key)
+        while len(_SKILL_COUNT_CACHE) > _SKILL_COUNT_CACHE_MAX_ENTRIES:
+            _SKILL_COUNT_CACHE.popitem(last=False)
+        return count
 
 
 # profile.yaml — per-profile metadata (description, role, etc.)

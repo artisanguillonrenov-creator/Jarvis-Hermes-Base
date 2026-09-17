@@ -11,7 +11,9 @@ import os
 import shutil
 import sys
 import tarfile
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -702,6 +704,52 @@ class TestListProfiles:
         names = [p.name for p in profiles]
         assert "alpha" in names
         assert "beta" in names
+
+    def test_concurrent_lists_share_one_skill_tree_walk(self, profile_env, monkeypatch):
+        """A poll burst must not make every worker recursively scan the same tree."""
+        skills_dir = profile_env / ".hermes" / "skills" / "category" / "example"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text("# Example\n", encoding="utf-8")
+        profiles._SKILL_COUNT_CACHE.clear()
+
+        original_rglob = Path.rglob
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def slow_rglob(path, pattern):
+            nonlocal calls
+            if path == profile_env / ".hermes" / "skills" and pattern == "SKILL.md":
+                with calls_lock:
+                    calls += 1
+                entered.set()
+                assert release.wait(timeout=2)
+            return original_rglob(path, pattern)
+
+        monkeypatch.setattr(Path, "rglob", slow_rglob)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(list_profiles) for _ in range(4)]
+            assert entered.wait(timeout=1)
+            release.set()
+            results = [future.result(timeout=2) for future in futures]
+
+        assert calls == 1
+        assert all(result[0].skill_count == 1 for result in results)
+        assert list_profiles()[0].skill_count == 1
+        assert calls == 1
+
+    def test_skill_count_cache_invalidates_when_a_category_changes(self, profile_env):
+        root = profile_env / ".hermes" / "skills" / "category"
+        (root / "first").mkdir(parents=True)
+        (root / "first" / "SKILL.md").write_text("# First\n", encoding="utf-8")
+        profiles._SKILL_COUNT_CACHE.clear()
+
+        assert list_profiles()[0].skill_count == 1
+        (root / "second").mkdir()
+        (root / "second" / "SKILL.md").write_text("# Second\n", encoding="utf-8")
+
+        assert list_profiles()[0].skill_count == 2
 
 
 # ===================================================================
