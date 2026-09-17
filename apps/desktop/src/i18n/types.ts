@@ -3256,6 +3256,8 @@ export interface Translations {
       openStarmap: string
       turnRunning: string
       contextUsage: string
+      contextMeterTitle: (used: string, max: string, percent: string) => string
+      contextMeterTotals: (input: string, output: string, total: string, calls: number) => string
       systemResources: {
         title: string
         loading: string
