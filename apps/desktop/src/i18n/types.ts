@@ -720,6 +720,10 @@ export interface Translations {
       composerPopoutDesc: string
       vibeHeartsTitle: string
       vibeHeartsDesc: string
+      linkOpenTitle: string
+      linkOpenDesc: string
+      linkOpenInApp: string
+      linkOpenExternal: string
       embedsTitle: string
       embedsDesc: string
       embedsAsk: string
