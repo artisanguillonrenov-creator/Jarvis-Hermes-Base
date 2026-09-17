@@ -791,6 +791,11 @@ export function SkillsView({
           profile. */}
       <div className="flex h-full flex-col">
         {profileScopeSelector}
+        {mode === 'plugins' ? (
+          <p className="min-w-0 px-3 pt-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+            {t.skills.plugins.pageBlurb}
+          </p>
+        ) : null}
         {(mode === 'skills' || mode === 'plugins') && (
           <CapabilityTabs
             actions={mode === 'skills' ? <UpdateSkillsButton profile={scopeProfile} /> : <PluginActions profile={scopeProfile} />}

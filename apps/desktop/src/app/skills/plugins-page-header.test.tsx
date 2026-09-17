@@ -35,6 +35,13 @@ describe('plugins pageBlurb', () => {
   })
 })
 
+
+describe('plugins pageBlurb wiring', () => {
+  it('renders pageBlurb from SkillsView on the plugins tab', () => {
+    expect(skillsIndexSource).toMatch(/t\.skills\.plugins\.pageBlurb/)
+  })
+})
+
 describe('plugins compact Agent-column scope selector', () => {
   it('uses a min-w-0 truncating trigger without max-w-64', () => {
     const triggerClass = compactTriggerClassFromSource()
