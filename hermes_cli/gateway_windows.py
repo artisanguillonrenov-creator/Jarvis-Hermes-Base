@@ -21,6 +21,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from hermes_cli._subprocess_compat import (
@@ -351,7 +352,7 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     lines = [
         f"' {_TASK_DESCRIPTION}",
         "Option Explicit",
-        "Dim sh, env, existing_pp",
+        "Dim sh, env, existing_pp, exit_code",
         'Set sh = CreateObject("WScript.Shell")',
         'Set env = sh.Environment("PROCESS")',
         f"env.Item({q('HERMES_HOME')}) = {q(hermes_home)}",
@@ -365,8 +366,10 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
         f"  env.Item({q('PYTHONPATH')}) = {q(static_pythonpath)}",
         "End If",
         f"sh.CurrentDirectory = {q(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn False = detached/async.
-        f"sh.Run {q(command_line)}, 0, False",
+        # Keep wscript console-less but wait for the hidden gateway so Task Scheduler
+        # receives its exit code and can apply RestartOnFailure.
+        f"exit_code = sh.Run({q(command_line)}, 0, True)",
+        "WScript.Quit exit_code",
     ]
     return "\r\n".join(lines) + "\r\n"
 
@@ -511,6 +514,70 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     if delete_detail:
         last_err = f"{last_err.strip()} (delete detail: {delete_detail})"
     return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()}")
+
+
+def _query_scheduled_task_xml(task_name: str) -> str | None:
+    """Return a registered task's XML, or ``None`` when it cannot be inspected.
+
+    Reconciliation must fail open: a localized ``schtasks`` failure or malformed
+    response is not evidence that an otherwise working task should be deleted.
+    """
+    code, out, err = _exec_schtasks(["/Query", "/TN", task_name, "/XML"])
+    if code != 0 or not out.strip():
+        logger.debug("Could not query Scheduled Task XML for %r: %s", task_name, (err or out).strip())
+        return None
+    return out
+
+
+def _task_xml_leaf_values(xml: str) -> dict[str, str] | None:
+    """Return namespace-agnostic XML leaf values, or ``None`` for invalid XML."""
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return None
+
+    values: dict[str, str] = {}
+
+    def visit(element: ElementTree.Element, path: tuple[str, ...]) -> None:
+        name = element.tag.rsplit("}", 1)[-1]
+        current_path = (*path, name)
+        children = list(element)
+        if not children:
+            values["/".join(current_path)] = " ".join((element.text or "").split())
+            return
+        for child in children:
+            visit(child, current_path)
+
+    visit(root, ())
+    return values
+
+
+def reconcile_scheduled_task(script_path: Path) -> bool | None:
+    """Replace an installed task only when its live XML predates the current contract.
+
+    ``True`` means it was re-registered, ``False`` means the task already
+    matches, and ``None`` means inspection or replacement failed.  The latter
+    deliberately leaves the existing task in place for the Startup fallback
+    and manual ``gateway install`` paths to handle.
+    """
+    task_name = get_task_name()
+    live_xml = _query_scheduled_task_xml(task_name)
+    if live_xml is None:
+        return None
+    live_values = _task_xml_leaf_values(live_xml)
+    expected_values = _task_xml_leaf_values(
+        _build_scheduled_task_xml(task_name, script_path.with_suffix(".vbs"), _resolve_task_user())
+    )
+    if live_values is None or expected_values is None:
+        logger.debug("Could not parse Scheduled Task XML for %r; leaving it unchanged", task_name)
+        return None
+    if all(live_values.get(path) == value for path, value in expected_values.items()):
+        return False
+    ok, detail = _install_scheduled_task(task_name, script_path)
+    if not ok:
+        logger.debug("Could not reconcile Scheduled Task %r: %s", task_name, detail)
+        return None
+    return True
 
 
 def _install_startup_entry(script_path: Path) -> Path:

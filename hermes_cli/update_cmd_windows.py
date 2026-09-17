@@ -1067,8 +1067,10 @@ def _refresh_windows_gateway_launchers() -> None:
     with _best_effort('Could not refresh Windows gateway launchers after update: %s'):
         from hermes_cli import gateway_windows
         if gateway_windows.is_installed():
-            gateway_windows._write_task_script()
+            script_path = gateway_windows._write_task_script()
             print("  ✓ Refreshed Windows gateway launcher scripts")
+            if gateway_windows.is_task_registered() and gateway_windows.reconcile_scheduled_task(script_path):
+                print("  ✓ Re-registered Windows Scheduled Task with current settings")
 
 
 def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
