@@ -40,6 +40,31 @@ def test_current_successors_settle_historical_obligations(monkeypatch, profiles)
 
 
 @pytest.mark.parametrize(
+    ("live_state", "settled"),
+    [("current", True), ("stale", False)],
+)
+def test_non_gateway_receipt_runtime_does_not_block_gateway_reconciliation(
+    monkeypatch, live_state, settled
+):
+    """A serve receipt is not gateway evidence, but stale live rows still are."""
+    directory = get_hermes_home() / "logs" / "update_receipts"
+    directory.mkdir(parents=True)
+    (directory / "latest.json").write_text(json.dumps({
+        "outcome": "failed",
+        "plan": {"runtimes": [
+            {"kind": "gateway", "profile": "default", "code_sha": "old"},
+            {"kind": "serve", "profile": "default", "code_sha": None},
+        ]},
+    }))
+    monkeypatch.setattr(update_cmd, "_current_checkout_sha", lambda: "new")
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda: [{
+        "profile": "default", "state": live_state, "code_sha": "new",
+    }])
+
+    assert update_cmd_fleet._pending_fleet_restart_needed() is not settled
+
+
+@pytest.mark.parametrize(
     "bad",
     [
         "missing",
@@ -47,7 +72,7 @@ def test_current_successors_settle_historical_obligations(monkeypatch, profiles)
         "down",
         "stale",
         "wrong-sha",
-        "wrong-kind",
+        "unknown-kind",
         "unknown-profile",
         "marker",
     ],
@@ -60,8 +85,8 @@ def test_every_owed_identity_requires_current_evidence(monkeypatch, bad):
         # Obligation for an SHA the fleet does not serve: no verified discharge.
         (home / "fleet_restart_pending").write_text("expected_sha=future\n")
     owed = {"kind": "gateway", "profile": "beta", "code_sha": "old"}
-    if bad == "wrong-kind":
-        owed["kind"] = "serve"
+    if bad == "unknown-kind":
+        owed["kind"] = "unknown-runtime"
     if bad == "unknown-profile":
         owed["profile"] = "unknown"
     (directory / "latest.json").write_text(

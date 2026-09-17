@@ -150,8 +150,10 @@ def _receipt_reports_stale_runtime(expected_sha: str | None = None) -> bool:
 def _receipt_owed_gateways() -> set[tuple[str, str]] | None:
     """``(kind, profile)`` identities ``latest.json`` owes a current successor.
 
-    Empty when the receipt records no runtimes; ``None`` when any recorded runtime is one
-    the gateway matrix cannot vouch for (serve/dashboard, unknown profile).
+    Empty when the receipt records no gateways. ``serve`` and ``dashboard`` entries are
+    intentionally outside the gateway matrix, so they do not prevent its verified gateway
+    rows from settling an obligation. ``None`` remains fail-closed for malformed,
+    unidentified, or unknown runtime identities.
     """
     from hermes_cli.update_receipt import read_latest_receipt
 
@@ -165,6 +167,8 @@ def _receipt_owed_gateways() -> set[tuple[str, str]] | None:
             return None
         kind = entry.get("kind", default_kind)
         profile = entry.get("profile")
+        if kind in ("serve", "dashboard"):
+            continue
         if kind != "gateway" or not profile or profile == "unknown":
             return None
         owed.add((kind, profile))
