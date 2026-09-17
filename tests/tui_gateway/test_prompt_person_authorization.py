@@ -119,9 +119,67 @@ def test_prompt_submit_rejects_expired_person_token():
     assert "expired" in response["error"]["message"]
 
 
+def test_failed_admission_delivery_can_retry_without_duplicate_terminal(monkeypatch):
+    holder = _authorization("person", admission_id="e" * 32)
+    attempts = []
+
+    def emit(*args):
+        attempts.append(args)
+        return len(attempts) > 1
+
+    monkeypatch.setattr(srv, "_emit", emit)
+
+    assert not srv._emit_person_admission("sid", holder, "terminal", reason="failed")
+    assert srv._emit_person_admission("sid", holder, "terminal", reason="failed")
+    assert not srv._emit_person_admission("sid", holder, "terminal", reason="failed")
+    assert len(attempts) == 2
+
+
+def test_raising_admission_delivery_does_not_break_cleanup_and_can_retry(monkeypatch):
+    holder = _authorization("person", admission_id="f" * 32)
+    attempts = []
+
+    def emit(*args):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise BrokenPipeError("transport closed")
+        return True
+
+    monkeypatch.setattr(srv, "_emit", emit)
+
+    assert not srv._emit_person_admission("sid", holder, "terminal", reason="failed")
+    assert srv._emit_person_admission("sid", holder, "terminal", reason="failed")
+    assert len(attempts) == 2
+
+
+def test_batch_admission_delivery_failure_does_not_abort_remaining_cleanup(monkeypatch):
+    first = _authorization("first", admission_id="d" * 32)
+    second = _authorization("second", admission_id="e" * 32)
+    delivered = []
+
+    def emit(_event, _sid, payload):
+        if payload["admission_id"] == "d" * 32:
+            raise RuntimeError("dead transport")
+        delivered.append(payload)
+        return True
+
+    monkeypatch.setattr(srv, "_emit", emit)
+
+    srv._emit_person_admissions("sid", [first, second], reason="session_finalized")
+
+    assert delivered == [{
+        "admission_id": "e" * 32,
+        "status": "terminal",
+        "reason": "session_finalized",
+    }]
+
+
 def test_person_authorized_submit_fails_closed_when_compute_isolation_is_required(monkeypatch):
+    admission_id = "1" * 32
     session = _session(types.SimpleNamespace())
+    events = []
     monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: True)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
     srv._sessions["sid"] = session
     try:
         response = srv._methods["prompt.submit"](
@@ -132,7 +190,7 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
                 "_fizko_person_access_token": "person-token",
                 "_fizko_person_access_token_expires_at": time.time() + 3600,
                 "_fizko_person_principal_id": "a" * 64,
-                "_fizko_person_admission_id": "1" * 32,
+                "_fizko_person_admission_id": admission_id,
             },
         )
     finally:
@@ -141,6 +199,60 @@ def test_person_authorized_submit_fails_closed_when_compute_isolation_is_require
     assert response["error"]["code"] == 4126
     assert session["running"] is False
     assert "_active_turn_authorization" not in session
+    assert events == [(
+        "person.admission", "sid", {
+            "admission_id": admission_id,
+            "status": "terminal",
+            "reason": "admission_rejected",
+        },
+    )]
+
+
+def test_personal_submit_thread_start_failure_terminally_releases_admission(monkeypatch):
+    admission_id = "f" * 32
+    session = _session(types.SimpleNamespace())
+    session["agent_ready"] = threading.Event()
+    events = []
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(srv, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(srv, "_persist_session_row_for_submit", lambda *_args: None)
+    monkeypatch.setattr(srv, "_restart_completed_failed_agent_build", lambda *_args: True)
+    monkeypatch.setattr(srv.threading, "Thread", FailingThread)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+    srv._sessions["sid"] = session
+    try:
+        with pytest.raises(RuntimeError, match="thread unavailable"):
+            srv._methods["prompt.submit"](
+                "r",
+                {
+                    "session_id": "sid",
+                    "text": "hello",
+                    "_fizko_person_access_token": "person-token",
+                    "_fizko_person_access_token_expires_at": time.time() + 3600,
+                    "_fizko_person_principal_id": "a" * 64,
+                    "_fizko_person_admission_id": admission_id,
+                },
+            )
+    finally:
+        srv._sessions.pop("sid", None)
+
+    assert session["running"] is False
+    assert "_active_turn_authorization" not in session
+    assert events == [(
+        "person.admission", "sid", {
+            "admission_id": admission_id,
+            "status": "terminal",
+            "reason": "submit_failed",
+        },
+    )]
 
 
 def test_queued_person_authorized_turn_does_not_bypass_compute_isolation(monkeypatch):
@@ -422,9 +534,10 @@ def test_authorization_clears_when_turn_is_cancelled_before_agent_ready(monkeypa
     holder = _authorization("cancelled-person")
     session = _session(types.SimpleNamespace())
     session.update(running=True, _active_turn_authorization=holder, _active_turn_route="inline")
+    events = []
     monkeypatch.setattr(srv, "_wait_agent_for_prompt", lambda *args: {"error": {"message": "cancelled"}})
     monkeypatch.setattr(srv, "_emit_terminal_turn_error", lambda *args, **kwargs: None)
-    monkeypatch.setattr(srv, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(srv, "_emit", lambda *args, **kwargs: events.append(args))
     monkeypatch.setattr(srv, "_session_info", lambda *args: {})
 
     srv._run_after_agent_ready("r", "sid", session, "hello", None, None, None, holder)
@@ -433,6 +546,77 @@ def test_authorization_clears_when_turn_is_cancelled_before_agent_ready(monkeypa
     assert "_active_turn_authorization" not in session
     assert "_active_turn_route" not in session
     assert current_fizko_authorization_header() == ""
+    assert events.count((
+        "person.admission", "sid", {
+            "admission_id": "1" * 32,
+            "status": "terminal",
+            "reason": "agent_not_ready",
+        },
+    )) == 1
+
+
+@pytest.mark.parametrize("failure_stage", ["readiness", "dispatch"])
+def test_exception_after_streaming_terminally_clears_active_admission(
+    monkeypatch, failure_stage,
+):
+    holder = _authorization("failed-person", admission_id="8" * 32)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        running=True,
+        _active_turn_authorization=holder,
+        _active_turn_route="inline",
+    )
+    events = []
+
+    if failure_stage == "readiness":
+        monkeypatch.setattr(
+            srv,
+            "_wait_agent_for_prompt",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("readiness failed")),
+        )
+    else:
+        monkeypatch.setattr(srv, "_wait_agent_for_prompt", lambda *_args: None)
+        monkeypatch.setattr(
+            srv,
+            "_run_prompt_submit",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("dispatch failed")),
+        )
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+
+    with pytest.raises(RuntimeError, match="failed"):
+        srv._run_after_agent_ready(
+            "r", "sid", session, "hello", None, None, None, holder
+        )
+
+    assert session["running"] is False
+    assert "_active_turn_authorization" not in session
+    assert "_active_turn_route" not in session
+    assert sum(event[0] == "person.admission" for event in events) == 1
+
+
+def test_cancel_after_streaming_terminally_accounts_person_admission(monkeypatch):
+    holder = _authorization("cancelled-person", admission_id="9" * 32)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        running=True,
+        _turn_cancel_requested=True,
+        _active_turn_authorization=holder,
+        _active_turn_route="inline",
+    )
+    events = []
+    monkeypatch.setattr(srv, "_wait_agent_for_prompt", lambda *args: None)
+    monkeypatch.setattr(srv, "_emit", lambda *args, **kwargs: events.append(args))
+
+    srv._run_after_agent_ready("r", "sid", session, "hello", None, None, None, holder)
+
+    assert events.count((
+        "person.admission", "sid", {
+            "admission_id": "9" * 32,
+            "status": "terminal",
+            "reason": "cancelled_before_ready",
+        },
+    )) == 1
+    assert "_active_turn_authorization" not in session
 
 
 def test_missing_queue_authorization_never_merges_into_token_envelope():
@@ -551,6 +735,7 @@ def test_personal_same_principal_prompts_are_never_merged_or_deduplicated():
 
 def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
     holder = _authorization("error-person")
+    events = []
 
     def fail(*args, **kwargs):
         assert current_fizko_authorization_header() == "Bearer error-person"
@@ -560,7 +745,7 @@ def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
     session = _session(agent)
     session.update(running=True, _active_turn_authorization=holder)
     monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
-    monkeypatch.setattr(srv, "_emit", lambda *args: None)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
     for name in (
         "_wire_callbacks",
         "_sync_agent_model_with_config",
@@ -576,6 +761,19 @@ def test_authorization_resets_after_agent_error(monkeypatch, tmp_path):
 
     assert current_fizko_authorization_header() == ""
     assert "_active_turn_authorization" not in session
+    assert [event for event in events if event[0] == "person.admission"] == [
+        (
+            "person.admission", "sid",
+            {"admission_id": "1" * 32, "status": "started"},
+        ),
+        (
+            "person.admission", "sid", {
+                "admission_id": "1" * 32,
+                "status": "terminal",
+                "reason": "run_failed",
+            },
+        ),
+    ]
 
 
 def test_queued_personal_admission_is_atomic_against_concurrent_submit(monkeypatch):
@@ -669,6 +867,69 @@ def test_failed_queued_personal_dispatch_drops_retired_admission(monkeypatch):
     assert "_active_turn_route" not in session
 
 
+def test_generation_cancel_does_not_restore_retired_personal_queue_claim(monkeypatch):
+    holder = _authorization("queued-person", admission_id="d" * 32)
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = {
+        "text": "cancel me", "transport": None, "turn_authorization": holder,
+    }
+    events = []
+
+    def bump_generation(claimed_session):
+        claimed_session["_queued_prompt_generation"] = 1
+        return False
+
+    monkeypatch.setattr(srv, "_session_uses_compute_host", bump_generation)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+
+    assert srv._drain_queued_prompt("drain", "sid", session) is True
+
+    assert session.get("queued_prompt") is None
+    assert session["running"] is False
+    assert events == [(
+        "person.admission", "sid", {
+            "admission_id": "d" * 32,
+            "status": "terminal",
+            "reason": "cancelled_before_dispatch",
+        },
+    )]
+
+
+def test_generation_bump_after_claim_check_cannot_drop_personal_dispatch(monkeypatch):
+    holder = _authorization("queued-person", admission_id="e" * 32)
+    session = _session(types.SimpleNamespace())
+    session["queued_prompt"] = {
+        "text": "dispatch me", "transport": None, "turn_authorization": holder,
+    }
+    underlying_lock = threading.RLock()
+
+    class BumpAfterSecondExit:
+        exits = 0
+
+        def __enter__(self):
+            underlying_lock.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            underlying_lock.release()
+            self.exits += 1
+            if self.exits == 2:
+                session["_queued_prompt_generation"] = 1
+
+    session["history_lock"] = BumpAfterSecondExit()
+    dispatched = []
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(
+        srv,
+        "_run_prompt_submit",
+        lambda *_args, **_kwargs: dispatched.append("dispatch") or True,
+    )
+
+    assert srv._drain_queued_prompt("drain", "sid", session) is True
+
+    assert dispatched == ["dispatch"]
+
+
 def test_failed_run_prompt_admission_clears_authorization_and_route(monkeypatch):
     holder = _authorization("refused-person")
     session = _session(types.SimpleNamespace())
@@ -725,24 +986,203 @@ def test_interrupt_clears_active_authorization_and_uses_forced_inline_route(monk
     assert "_active_turn_route" not in session
 
 
-def test_reset_clears_active_authorization_and_route(monkeypatch):
-    holder = _authorization("active-person")
+@pytest.mark.parametrize("queued_count", [1, 3])
+def test_interrupt_terminally_accounts_each_queued_personal_admission_once(
+    monkeypatch, queued_count,
+):
+    active = _authorization("active-person", admission_id="a" * 32)
+    queued = [
+        _authorization(f"queued-{index}", admission_id=f"{index + 1:x}" * 32)
+        for index in range(queued_count)
+    ]
+    session = _session(types.SimpleNamespace(interrupt=lambda: None))
+    session.update(
+        running=True,
+        _active_turn_authorization=active,
+        _active_turn_route="inline",
+        _run_thread=types.SimpleNamespace(is_alive=lambda: True),
+        queued_prompt={
+            "text": "queued-0", "transport": None,
+            "turn_authorization": queued[0],
+        },
+        queued_prompts=[
+            {
+                "text": f"queued-{index}", "transport": None,
+                "turn_authorization": authorization,
+            }
+            for index, authorization in enumerate(queued[1:], start=1)
+        ],
+    )
+    events = []
+    monkeypatch.setattr(srv, "_emit", lambda *args, **kwargs: events.append(args))
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+
+    assert srv._interrupt_session_turn("sid", session) is False
+    assert srv._interrupt_session_turn("sid", session) is False
+
+    terminal = [event for event in events if event[0] == "person.admission"]
+    assert terminal == [
+        (
+            "person.admission", "sid", {
+                "admission_id": authorization._fizko_admission_id(),
+                "status": "terminal",
+                "reason": "interrupted_while_queued",
+            },
+        )
+        for authorization in queued
+    ]
+    assert session.get("queued_prompt") is None
+    assert not session.get("queued_prompts")
+    assert session["_active_turn_authorization"] is active
+    assert session["running"] is True
+    assert all(event[2]["admission_id"] != "a" * 32 for event in terminal)
+
+
+def test_interrupt_terminally_accounts_abandoned_active_admission(monkeypatch):
+    active = _authorization("active-person", admission_id="a" * 32)
+    session = _session(types.SimpleNamespace(interrupt=lambda: None))
+    session.update(
+        running=False,
+        _active_turn_authorization=active,
+        _active_turn_route="inline",
+    )
+    events = []
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args) or True)
+    monkeypatch.setattr(srv, "_clear_pending", lambda *_args: None)
+
+    assert srv._interrupt_session_turn("sid", session) is False
+
+    assert events == [(
+        "person.admission", "sid", {
+            "admission_id": "a" * 32,
+            "status": "terminal",
+            "reason": "interrupted",
+        },
+    )]
+    assert "_active_turn_authorization" not in session
+
+
+def test_reset_terminally_accounts_active_and_queued_person_admissions(monkeypatch):
+    active = _authorization("active-person", admission_id="a" * 32)
+    queued = _authorization("queued-person", admission_id="b" * 32)
     new_agent = types.SimpleNamespace()
     session = _session(types.SimpleNamespace())
-    session.update(_active_turn_authorization=holder, _active_turn_route="inline")
+    session.update(
+        _active_turn_authorization=active,
+        _active_turn_route="inline",
+        queued_prompt={
+            "text": "queued", "transport": None, "turn_authorization": queued,
+        },
+    )
+    events = []
     monkeypatch.setattr(srv, "_set_session_context", lambda *_args: [])
     monkeypatch.setattr(srv, "_clear_session_context", lambda *_args: None)
     monkeypatch.setattr(srv, "_rebuild_session_agent", lambda *_args, **_kwargs: new_agent)
     monkeypatch.setattr(srv, "_session_source", lambda *_args: "tui")
     monkeypatch.setattr(srv, "_context_cwd_is_launch_artifact", lambda *_args: False)
     monkeypatch.setattr(srv, "_session_info", lambda *_args: {})
-    monkeypatch.setattr(srv, "_emit", lambda *_args: None)
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
     monkeypatch.setattr(srv, "_restart_slash_worker", lambda *_args: None)
 
     srv._reset_session_agent("sid", session)
 
     assert "_active_turn_authorization" not in session
     assert "_active_turn_route" not in session
+    assert session.get("queued_prompt") is None
+    assert events[:2] == [
+        (
+            "person.admission", "sid", {
+                "admission_id": "a" * 32,
+                "status": "terminal",
+                "reason": "session_reset",
+            },
+        ),
+        (
+            "person.admission", "sid", {
+                "admission_id": "b" * 32,
+                "status": "terminal",
+                "reason": "session_reset",
+            },
+        ),
+    ]
+
+
+def test_finalize_terminally_accounts_active_and_queued_person_admissions(monkeypatch):
+    active = _authorization("active-person", admission_id="c" * 32)
+    queued = _authorization("queued-person", admission_id="d" * 32)
+    session = _session(types.SimpleNamespace(session_id=""))
+    session.update(
+        _sid="sid",
+        _active_turn_authorization=active,
+        _active_turn_route="inline",
+        queued_prompt={
+            "text": "queued", "transport": None, "turn_authorization": queued,
+        },
+    )
+    events = []
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+    monkeypatch.setattr(srv, "_notify_session_boundary", lambda *_args: None)
+    monkeypatch.setattr(srv, "_release_active_session_slot", lambda *_args: True)
+
+    srv._finalize_session(session)
+    srv._finalize_session(session)
+
+    assert events == [
+        (
+            "person.admission", "sid", {
+                "admission_id": "c" * 32,
+                "status": "terminal",
+                "reason": "session_finalized",
+            },
+        ),
+        (
+            "person.admission", "sid", {
+                "admission_id": "d" * 32,
+                "status": "terminal",
+                "reason": "session_finalized",
+            },
+        ),
+    ]
+    assert "_active_turn_authorization" not in session
+    assert session.get("queued_prompt") is None
+
+
+def test_reset_does_not_drop_personal_admission_queued_during_rebuild(monkeypatch):
+    before_reset = _authorization("before-reset", admission_id="a" * 32)
+    after_boundary = _authorization("after-boundary", admission_id="b" * 32)
+    session = _session(types.SimpleNamespace())
+    session.update(
+        running=True,
+        queued_prompt={
+            "text": "old", "transport": None, "turn_authorization": before_reset,
+        },
+    )
+    events = []
+
+    def rebuild(*_args, **_kwargs):
+        session["queued_prompt"] = {
+            "text": "new", "transport": None, "turn_authorization": after_boundary,
+        }
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr(srv, "_set_session_context", lambda *_args: [])
+    monkeypatch.setattr(srv, "_clear_session_context", lambda *_args: None)
+    monkeypatch.setattr(srv, "_rebuild_session_agent", rebuild)
+    monkeypatch.setattr(srv, "_session_source", lambda *_args: "tui")
+    monkeypatch.setattr(srv, "_context_cwd_is_launch_artifact", lambda *_args: False)
+    monkeypatch.setattr(srv, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(srv, "_emit", lambda *args: events.append(args))
+    monkeypatch.setattr(srv, "_restart_slash_worker", lambda *_args: None)
+
+    srv._reset_session_agent("sid", session)
+
+    assert session["queued_prompt"]["turn_authorization"] is after_boundary
+    terminal_ids = {
+        payload["admission_id"]
+        for event, _sid, payload in events
+        if event == "person.admission"
+    }
+    assert terminal_ids == {"a" * 32}
 
 
 def _install_token_bearing_direct_rpc_session(monkeypatch):

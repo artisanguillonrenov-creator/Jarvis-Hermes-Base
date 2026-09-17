@@ -173,7 +173,7 @@ def _clear_active_turn_state(session: dict, expected=_ANY_ACTIVE_AUTHORIZATION) 
 
 
 def _emit_person_admission(
-    sid: str, authorization: Any, status: str, *, reason: str | None = None
+    sid: str, authorization: object, status: str, *, reason: str | None = None
 ) -> bool:
     """Emit one private exact-ID lifecycle event when the holder is personal."""
     admission_id = authorization._fizko_admission_id()
@@ -182,8 +182,61 @@ def _emit_person_admission(
     payload = {"admission_id": admission_id, "status": status}
     if reason is not None:
         payload["reason"] = reason
-    _emit("person.admission", sid, payload)
-    return True
+
+    def deliver() -> bool:
+        try:
+            return _emit("person.admission", sid, payload)
+        except Exception:
+            logger.debug(
+                "person admission live delivery failed sid=%s status=%s",
+                sid,
+                status,
+                exc_info=True,
+            )
+            return False
+
+    return authorization._fizko_emit_admission_event(
+        status, deliver
+    )
+
+
+def _emit_person_admissions(
+    sid: str, authorizations: list[Any], *, reason: str
+) -> None:
+    """Best-effort every abandoned admission without aborting lifecycle cleanup."""
+    for authorization in authorizations:
+        try:
+            _emit_person_admission(sid, authorization, "terminal", reason=reason)
+        except Exception:
+            logger.debug(
+                "person admission terminal delivery failed sid=%s reason=%s",
+                sid,
+                reason,
+                exc_info=True,
+            )
+
+
+def _collect_person_admissions(session: dict, *, include_active: bool = True) -> list[Any]:
+    """Snapshot unique personal admission holders while ``history_lock`` is held."""
+    candidates = []
+    if include_active:
+        candidates.append(session.get("_active_turn_authorization"))
+    candidates.extend(
+        entry.get("turn_authorization")
+        for entry in [session.get("queued_prompt"), *(session.get("queued_prompts") or [])]
+        if isinstance(entry, dict)
+    )
+    admissions = []
+    seen = set()
+    for authorization in candidates:
+        identity = id(authorization)
+        if (
+            identity not in seen
+            and bool(getattr(authorization, "is_personal", False))
+        ):
+            seen.add(identity)
+            admissions.append(authorization)
+    return admissions
 
 
 def _enqueue_prompt(
@@ -463,16 +516,31 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 daemon=True,
             ).start()
         return bool(rejected_messages)
+    cancelled_before_dispatch = None
+    generation_cancelled = False
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
-            # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
-            # envelope (claimed head first, then whatever advanced into the slot) so a legitimate follow-up isn't dropped.
-            # See #84417.
-            advanced = session.get("queued_prompt")
-            _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
+            generation_cancelled = True
+            # A generation bump cancelled this claimed head. Ordinary prompts retain
+            # their historical retry behavior; a personal admission is a one-shot
+            # accounting unit and cannot be restored after cancellation.
+            if turn_authorization.is_personal:
+                cancelled_before_dispatch = turn_authorization
+            else:
+                advanced = session.get("queued_prompt")
+                _ac_set_queue(
+                    session,
+                    [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])],
+                )
             session["running"] = False
             _clear_active_turn_state(session, turn_authorization)
-            return True
+    if cancelled_before_dispatch is not None:
+        _emit_person_admission(
+            sid, cancelled_before_dispatch, "terminal", reason="cancelled_before_dispatch"
+        )
+        return True
+    if generation_cancelled:
+        return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
     if queued.get("image_paths"):
         kwargs["image_paths"] = queued["image_paths"]

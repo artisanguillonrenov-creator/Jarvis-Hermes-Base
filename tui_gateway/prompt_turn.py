@@ -891,12 +891,9 @@ def _run_prompt_submit(
         sid, session, text, image_paths, queued_prompt_generation, display_kind,
         display_metadata, authorization)
     if admitted is None:
-        if admission_id := authorization._fizko_admission_id():
-            _emit("person.admission", sid, {
-                "admission_id": admission_id,
-                "status": "terminal",
-                "reason": "admission_rejected",
-            })
+        _emit_person_admission(
+            sid, authorization, "terminal", reason="admission_rejected"
+        )
         with session["history_lock"]:
             _clear_active_turn_state(session, authorization)
         return False
@@ -915,7 +912,6 @@ def _run_prompt_submit(
         "kind=%s chars=%s images=%d",
         sid, session.get("session_key") or "", getattr(agent, "session_id", "") or "",
         display_kind or "user", len(text) if isinstance(text, str) else "-", len(images))
-    admission_id = authorization._fizko_admission_id()
     _emit("message.start", sid)
 
     def run():
@@ -924,11 +920,7 @@ def _run_prompt_submit(
             set_current_turn_authorization,
         )
 
-        if admission_id:
-            _emit("person.admission", sid, {
-                "admission_id": admission_id,
-                "status": "started",
-            })
+        _emit_person_admission(sid, authorization, "started")
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
@@ -941,6 +933,7 @@ def _run_prompt_submit(
             turn_authorization=authorization,
         )
         goal_followup = None
+        terminal_reason = "run_failed"
         authorization_token = set_current_turn_authorization(authorization)
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
@@ -965,18 +958,16 @@ def _run_prompt_submit(
             # Goal judge + loop tick evaluation mutate persisted state AFTER message.complete: publish the
             # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
             _publish_session_control_snapshot(sid, session, only_if_present=True)
+            terminal_reason = "finished"
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
             # End the authorization scope before persistence/events/follow-ups: none of those
             # surfaces may inherit or serialize the person's bearer.
             reset_current_turn_authorization(authorization_token)
-            if admission_id:
-                _emit("person.admission", sid, {
-                    "admission_id": admission_id,
-                    "status": "terminal",
-                    "reason": "finished",
-                })
+            _emit_person_admission(
+                sid, authorization, "terminal", reason=terminal_reason
+            )
             _finish_turn(sid, session, st)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
@@ -1025,7 +1016,16 @@ def _run_prompt_submit(
                 )
             finally:
                 reset_current_turn_authorization(descendant_token)
-    run_thread = threading.Thread(target=run, daemon=True)
+    def guarded_run():
+        try:
+            run()
+        except BaseException:
+            _emit_person_admission(
+                sid, authorization, "terminal", reason="run_failed"
+            )
+            raise
+
+    run_thread = threading.Thread(target=guarded_run, daemon=True)
     start_error = None
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
@@ -1045,12 +1045,10 @@ def _run_prompt_submit(
                 can_start = False
                 session.pop("_run_thread", None)
     if not can_start:
-        if admission_id:
-            _emit("person.admission", sid, {
-                "admission_id": admission_id,
-                "status": "terminal",
-                "reason": "start_failed" if start_error is not None else "start_rejected",
-            })
+        _emit_person_admission(
+            sid, authorization, "terminal",
+            reason="start_failed" if start_error is not None else "start_rejected",
+        )
         with session["history_lock"]:
             if _clear_active_turn_state(session, authorization):
                 session["running"] = False

@@ -5,6 +5,7 @@ method_ctx.bind_module), so they reference server.py globals bare.
 """
 
 import contextlib
+import functools
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -495,8 +496,21 @@ def _run_after_agent_ready(
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
-    err = _wait_agent_for_prompt(session, rid, sid)
+    try:
+        err = _wait_agent_for_prompt(session, rid, sid)
+    except BaseException:
+        with session["history_lock"]:
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
+                _clear_inflight_turn(session)
+        _emit_person_admission(
+            sid, turn_authorization, "terminal", reason="agent_not_ready"
+        )
+        raise
     if err:
+        _emit_person_admission(
+            sid, turn_authorization, "terminal", reason="agent_not_ready"
+        )
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
         _emit_terminal_turn_error(
@@ -508,22 +522,48 @@ def _run_after_agent_ready(
                 session["last_active"] = time.time()
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
+    terminal_reason = None
+    terminal_message = None
     with session["history_lock"]:
         if session.get("_turn_cancel_requested") or not session.get("running"):
+            terminal_reason = (
+                "cancelled_before_ready"
+                if session.get("_turn_cancel_requested")
+                else "session_stopped_before_ready"
+            )
             if _clear_active_turn_state(session, turn_authorization):
                 session["running"] = False
                 _clear_inflight_turn(session)
-            # Without this emit the turn vanishes silently after {"status": "streaming"}.
-            _emit("error", sid, {"message": (
+            terminal_message = (
                 "Turn cancelled before the agent was ready"
                 if session.get("_turn_cancel_requested")
-                else "Session no longer running before the agent was ready")})
-            return
-    started = _run_prompt_submit(
-        rid, sid, session, text, display_kind=display_kind,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author,
-        turn_authorization=turn_authorization)
+                else "Session no longer running before the agent was ready"
+            )
+    if terminal_reason is not None:
+        _emit_person_admission(
+            sid, turn_authorization, "terminal", reason=terminal_reason
+        )
+        # Without this emit the turn vanishes silently after {"status": "streaming"}.
+        _emit("error", sid, {"message": terminal_message})
+        return
+    try:
+        started = _run_prompt_submit(
+            rid, sid, session, text, display_kind=display_kind,
+            terminal_callback=hosted_terminal_callback, turn_author=turn_author,
+            turn_authorization=turn_authorization)
+    except BaseException:
+        with session["history_lock"]:
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
+                _clear_inflight_turn(session)
+        _emit_person_admission(
+            sid, turn_authorization, "terminal", reason="dispatch_failed"
+        )
+        raise
     if not started:
+        _emit_person_admission(
+            sid, turn_authorization, "terminal", reason="admission_rejected"
+        )
         with session["history_lock"]:
             if _clear_active_turn_state(session, turn_authorization):
                 session["running"] = False
@@ -577,8 +617,63 @@ def _lock_in_submit_turn(
 # Per-turn client surfaces that carry a model-bound note (session_notifications._surface_note).
 _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
+_PARSED_PERSON_AUTHORIZATION = "_hermes_parsed_person_authorization"
+
+
+def _person_admission_lifecycle(fn):
+    """Close every trusted admission unless the handler hands it to a live/queued turn.
+
+    This wrapper deliberately sits outside the prompt handler's many validation and
+    readiness exits.  The same opaque holder is injected into the handler so later
+    queue/run terminal paths share its idempotent lifecycle state.
+    """
+    @functools.wraps(fn)
+    def guarded(rid, params: dict):
+        from agent.turn_authorization import (
+            FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM,
+            FIZKO_PERSON_ACCESS_TOKEN_PARAM,
+            FIZKO_PERSON_ADMISSION_ID_PARAM,
+            FIZKO_PERSON_PRINCIPAL_ID_PARAM,
+            TurnAuthorization,
+        )
+
+        params.pop(_PARSED_PERSON_AUTHORIZATION, None)
+        try:
+            authorization = TurnAuthorization.from_raw(
+                params.get(FIZKO_PERSON_ACCESS_TOKEN_PARAM),
+                expires_at=params.get(FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM),
+                principal_id=params.get(FIZKO_PERSON_PRINCIPAL_ID_PARAM),
+                admission_id=params.get(FIZKO_PERSON_ADMISSION_ID_PARAM),
+                require_admission=True,
+            )
+        except ValueError:
+            return fn(rid, params)
+        params[_PARSED_PERSON_AUTHORIZATION] = authorization
+        try:
+            response = fn(rid, params)
+        except BaseException:
+            _emit_person_admission(
+                str(params.get("session_id") or ""),
+                authorization,
+                "terminal",
+                reason="submit_failed",
+            )
+            raise
+        finally:
+            params.pop(_PARSED_PERSON_AUTHORIZATION, None)
+        result = response.get("result") if isinstance(response, dict) else None
+        status = result.get("status") if isinstance(result, dict) else None
+        if status not in {"queued", "streaming"}:
+            reason = "voice_stopped" if isinstance(result, dict) and result.get("voice_stopped") else "admission_rejected"
+            _emit_person_admission(str(params.get("session_id") or ""), authorization,
+                                   "terminal", reason=reason)
+        return response
+
+    return guarded
+
 
 @method("prompt.submit")
+@_person_admission_lifecycle
 def _(rid, params: dict) -> dict:
     from agent.turn_authorization import (
         FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM,
@@ -588,22 +683,26 @@ def _(rid, params: dict) -> dict:
         TurnAuthorization,
     )
 
+    parsed_authorization = params.pop(_PARSED_PERSON_AUTHORIZATION, None)
     raw_person_token = params.pop(FIZKO_PERSON_ACCESS_TOKEN_PARAM, None)
     raw_person_token_expires_at = params.pop(
         FIZKO_PERSON_ACCESS_TOKEN_EXPIRES_AT_PARAM, None
     )
     raw_person_principal_id = params.pop(FIZKO_PERSON_PRINCIPAL_ID_PARAM, None)
     raw_person_admission_id = params.pop(FIZKO_PERSON_ADMISSION_ID_PARAM, None)
-    try:
-        turn_authorization = TurnAuthorization.from_raw(
-            raw_person_token,
-            expires_at=raw_person_token_expires_at,
-            principal_id=raw_person_principal_id,
-            admission_id=raw_person_admission_id,
-            require_admission=True,
-        )
-    except ValueError as exc:
-        return _err(rid, 4004, str(exc))
+    if isinstance(parsed_authorization, TurnAuthorization):
+        turn_authorization = parsed_authorization
+    else:
+        try:
+            turn_authorization = TurnAuthorization.from_raw(
+                raw_person_token,
+                expires_at=raw_person_token_expires_at,
+                principal_id=raw_person_principal_id,
+                admission_id=raw_person_admission_id,
+                require_admission=True,
+            )
+        except ValueError as exc:
+            return _err(rid, 4004, str(exc))
     if turn_authorization.has_token and turn_authorization.is_expired:
         return _err(rid, 4004, "person token is expired")
 
@@ -743,17 +842,25 @@ def _(rid, params: dict) -> dict:
                 session["_active_turn_route"] = "inline"
     if (err := _persist_session_row_for_submit(rid, session)) is not None:
         return err
-    # A completed FAILED build must not wedge the session: rebuild, don't replay it.
-    if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
-        _start_agent_build(sid, session)
-    run_thread = threading.Thread(
-        target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author,
-            turn_authorization),
-        daemon=True)
-    # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
-    session["_run_thread"] = run_thread
-    run_thread.start()
+    try:
+        # A completed FAILED build must not wedge the session: rebuild, don't replay it.
+        if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
+            _start_agent_build(sid, session)
+        run_thread = threading.Thread(
+            target=lambda: _run_after_agent_ready(
+                rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author,
+                turn_authorization),
+            daemon=True)
+        # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
+        session["_run_thread"] = run_thread
+        run_thread.start()
+    except BaseException:
+        with session["history_lock"]:
+            if _clear_active_turn_state(session, turn_authorization):
+                session["running"] = False
+                _clear_inflight_turn(session)
+            session.pop("_run_thread", None)
+        raise
     return _ok(rid, {"status": "streaming", **survivor_fields})
 
 

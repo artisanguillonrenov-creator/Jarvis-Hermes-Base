@@ -11,6 +11,7 @@ import contextvars
 import hmac
 import math
 import re
+import threading
 import time
 from contextlib import contextmanager
 from typing import Iterator
@@ -31,6 +32,8 @@ class TurnAuthorization:
 
     __slots__ = (
         "__admission_id",
+        "__admission_lock",
+        "__admission_state",
         "__expires_at",
         "__personal",
         "__principal_id",
@@ -51,6 +54,8 @@ class TurnAuthorization:
         self.__personal = personal
         self.__principal_id = principal_id
         self.__admission_id = admission_id
+        self.__admission_lock = threading.Lock()
+        self.__admission_state = "pending"
 
     @classmethod
     def from_raw(
@@ -145,6 +150,32 @@ class TurnAuthorization:
     def _fizko_admission_id(self) -> str:
         """Private accounting correlation; never an authenticator."""
         return self.__admission_id or ""
+
+    def _fizko_emit_admission_event(self, status: str, emitter: Any) -> bool:
+        """Emit and atomically commit one lifecycle state transition.
+
+        ``started`` and ``terminal`` are each emitted at most once, and a late
+        ``started`` can never resurrect an already terminal admission. A failed
+        transport write leaves the transition retryable.
+        """
+        if not self.__admission_id or status not in {"started", "terminal"}:
+            return False
+        with self.__admission_lock:
+            if self.__admission_state == "terminal":
+                return False
+            if status == "started":
+                if self.__admission_state != "pending":
+                    return False
+            # Gateway transports are terminal sinks: their internal write locks
+            # never call back into admission handling. Keep the holder lock over
+            # the write so a racing terminal cannot overtake or duplicate started.
+            # Transport.write is specified to return bool. Test sinks commonly
+            # return None after recording, so only an explicit False means the
+            # live delivery failed and should remain retryable.
+            if emitter() is False:
+                return False
+            self.__admission_state = status
+            return True
 
     def _fizko_authorization_header(self) -> str:
         return f"Bearer {self.__token}" if self.__token is not None and not self.is_expired else ""

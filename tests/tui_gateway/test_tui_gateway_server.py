@@ -1951,7 +1951,8 @@ def test_voice_record_start_handles_non_dict_voice_cfg(monkeypatch):
         assert captured["auto_restart"] is False
 
 
-def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch):
+@pytest.mark.parametrize("personal", [False, True], ids=["static", "personal"])
+def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch, personal):
     """Typed bare stop phrase during an active voice chat is consumed at the
     prompt.submit choke point: voice mode flips off, a distinct
     voice.transcript {stop_phrase, typed} event fires, and NO turn starts.
@@ -1981,11 +1982,19 @@ def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch):
     monkeypatch.setenv("HERMES_VOICE", "1")
     monkeypatch.setenv("HERMES_VOICE_TTS", "1")
 
+    params = {"session_id": "any-sid", "text": "Stop."}
+    if personal:
+        params.update({
+            "_fizko_person_access_token": "voice-stop-person-token",
+            "_fizko_person_access_token_expires_at": time.time() + 300,
+            "_fizko_person_principal_id": "a" * 64,
+            "_fizko_person_admission_id": "b" * 32,
+        })
     resp = server.dispatch(
         {
             "id": "typed-stop",
             "method": "prompt.submit",
-            "params": {"session_id": "any-sid", "text": "Stop."},
+            "params": params,
         }
     )
 
@@ -1994,6 +2003,13 @@ def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch):
     assert os.environ["HERMES_VOICE_TTS"] == "0"
     assert calls["stop_continuous"] == 1
     assert ("voice.transcript", {"stop_phrase": True, "typed": True}) in emitted
+    assert emitted.count((
+        "person.admission", {
+            "admission_id": "b" * 32,
+            "status": "terminal",
+            "reason": "voice_stopped",
+        },
+    )) == int(personal)
 
 
 def test_prompt_submit_typed_stop_passes_through_when_voice_off(monkeypatch):
