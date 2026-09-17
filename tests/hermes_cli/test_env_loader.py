@@ -8,6 +8,29 @@ from pathlib import Path
 from hermes_cli.env_loader import load_hermes_dotenv
 
 
+def test_dotenv_loading_never_attempts_to_import_providers(tmp_path):
+    """Environment bootstrap must remain usable before optional providers are importable."""
+    import builtins
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    attempted: list[str] = []
+    original_import = builtins.__import__
+
+    def record_provider_import(name, *args, **kwargs):
+        if name == "providers" or name.startswith("providers."):
+            attempted.append(name)
+        return original_import(name, *args, **kwargs)
+
+    builtins.__import__ = record_provider_import
+    try:
+        load_hermes_dotenv(hermes_home=home, load_external_secrets=False)
+    finally:
+        builtins.__import__ = original_import
+
+    assert attempted == []
+
+
 def test_dotenv_sanitization_loads_before_provider_entry_point_import(tmp_path):
     """A provider import at the config boundary must run after dotenv loading.
 
