@@ -90,6 +90,7 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.status import acquire_scoped_lock, release_scoped_lock
+from agent.message_sanitization import _sanitize_surrogates
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, env_float, env_int
 
@@ -437,7 +438,7 @@ def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
 # --- Post payload builders and parsers ---
 
 def _build_markdown_post_payload(content: str) -> str:
-    rows = _build_markdown_post_rows(content)
+    rows = _build_markdown_post_rows(_sanitize_surrogates(content))
     return json.dumps({"zh_cn": {"content": rows}}, ensure_ascii=False)
 
 
@@ -1574,7 +1575,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        formatted = self.format_message(content)
+        formatted = _sanitize_surrogates(self.format_message(content))
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         # Decide markdown-vs-text once for the whole message: a chunk of a long
         # markdown reply may be plain prose that fails the per-chunk regex and would
@@ -1624,7 +1625,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        content = self.format_message(content)
+        content = _sanitize_surrogates(self.format_message(content))
 
         async def _update(msg_type: str, payload: str) -> SendResult:
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
@@ -3496,6 +3497,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # lets ``send`` treat the chunk as part of a larger markdown document: when a long markdown reply is
         # split at MAX_MESSAGE_LENGTH, the per-chunk regex would otherwise mis-classify a plain-prose chunk
         # as ``text``. See #26841.
+        content = _sanitize_surrogates(content)
         if prefer_post or _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         return "text", json.dumps({"text": content}, ensure_ascii=False)
