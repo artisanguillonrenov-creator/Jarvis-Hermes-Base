@@ -699,8 +699,8 @@ export function SkillsView({
   // Scope-selector rows. Multi-connection desktops list every reachable
   // (connection, profile) agent from the union roster — the selected profile
   // is configured ON ITS OWN GATEWAY. Otherwise the legacy per-profile list.
-  // Plugins embeds this selector in a HALF_COL cell — compact labels and
-  // trigger classes keep the roster from widening the window. Other tabs
+    // Plugins uses a compact profile selector (truncate + viewport-capped
+  // content) so long roster labels do not widen the header. Other tabs
   // keep the full `profile — device (current)` rows.
   const compactSelector = mode === 'plugins'
   const scopeOptions: { key: string; label: string; value: string }[] = useMemo(() => {

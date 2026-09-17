@@ -429,6 +429,7 @@ export const PluginsTab = memo(function PluginsTab({
           />
         }}
         view={view}
-      />    </div>
+      />
+    </div>
   )
 })

@@ -1,6 +1,5 @@
-/** Compact Plugins header lives in a HALF_COL `w-36` cell. `max-w-64` (256px)
- *  is wider than that cell and lets the trigger grow the window; truncate
- *  inside `min-w-0` instead. */
+/** Compact Plugins profile trigger: truncate inside `min-w-0` so long
+ *  roster labels do not grow the header. */
 export const COMPACT_SCOPE_TRIGGER_CLASS = 'h-6 min-w-0 w-full px-2 truncate'
 
 /** Cap the open list to the remaining viewport — do not inherit the
