@@ -152,44 +152,6 @@ jobs:
           sed -i 's/^TERMUX_PKG_SHA256=4e6131cc859ec6a36569f1978cf3617cc3836a681d13d228ded1b4885dab7770$/TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3/' x11-packages/foot/build.sh
           grep -qx 'TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3' x11-packages/foot/build.sh
 
-      - name: Patch coreutils to skip the statfs runtime probes that hang in this Docker sandbox
-        # Root-caused 2026-09-18 after reproducing the run #9/#10/#11 hang
-        # four times in the exact same narrow spot: coreutils' gnulib
-        # configure script, right after the sys/mount.h header check,
-        # chains up to five "checking for N-argument statfs/statvfs..."
-        # probes (fu_cv_sys_stat_statvfs, _statfs2_frsize, _statfs2_bsize,
-        # _statfs4, _statfs2_fsize) that -- unless already answered from a
-        # cache -- actually compile, link AND RUN a tiny test program that
-        # calls statfs(".", &fsd) / statvfs(0, &fsd) on the real
-        # filesystem. coreutils/build.sh (upstream termux-packages, at our
-        # pinned commit) pre-answers only gl_cv_host_operating_system and
-        # ac_cv_func_getpass, leaving this entire statfs cluster to rely on
-        # autoconf's cross-compiling guess -- which should normally skip
-        # execution, but something about this build's Docker sandbox
-        # (apparmor=unconfined + fuse-overlayfs, both already needed to get
-        # this far at all) evidently makes one of those probes actually run
-        # and then block forever with zero output, rather than the fast
-        # link-or-guess result every other package sees.
-        # This package explicitly does not ship `df` already ("df does not
-        # work either, let system binary prevail" -- see the comment in
-        # coreutils/build.sh itself), and `df` is the only coreutils
-        # consumer of this filesystem-usage detection, so forcing all five
-        # answers to the same "no" a correctly-guessing cross-compile would
-        # produce on Linux anyway has no effect on anything Hermès actually
-        # uses (ls, cat, mv, sort, etc. don't call statfs()).
-        working-directory: termux-packages-src
-        run: |
-          set -euo pipefail
-          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statvfs=no' packages/coreutils/build.sh
-          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_frsize=no' packages/coreutils/build.sh
-          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_bsize=no' packages/coreutils/build.sh
-          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs4=no' packages/coreutils/build.sh
-          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_fsize=no' packages/coreutils/build.sh
-          grep -qx 'fu_cv_sys_stat_statvfs=no' packages/coreutils/build.sh
-          grep -qx 'fu_cv_sys_stat_statfs2_fsize=no' packages/coreutils/build.sh
-          echo "Patched coreutils/build.sh's TERMUX_PKG_EXTRA_CONFIGURE_ARGS:"
-          sed -n '/TERMUX_PKG_EXTRA_CONFIGURE_ARGS=/,/^"/p' packages/coreutils/build.sh
-
       - name: Patch build-bootstraps.sh's stale 'bzip2' package name
         # Reproduced 2026-09-18 (run #8, ~1h10 into the real build — bash
         # compiled fine, then the very next default bootstrap package
@@ -211,6 +173,31 @@ jobs:
           set -euo pipefail
           sed -i 's/PACKAGES+=("bzip2")/PACKAGES+=("libbz2")/' scripts/build-bootstraps.sh
           grep -qx '		PACKAGES+=("libbz2")' scripts/build-bootstraps.sh
+
+      - name: Replace coreutils with busybox in the default bootstrap package list
+        # Decided 2026-09-18 after coreutils' gnulib configure hung five
+        # separate times (runs #9-#14 and #16), each on a different
+        # permission/filesystem syscall probe, despite three targeted
+        # fixes (libbz2 rename, statfs cache pre-answers, NSS hardening) --
+        # diminishing returns on patching one gnulib check at a time.
+        # busybox builds via a single Kconfig + make, no autoconf/gnulib at
+        # all, so this whole class of hang doesn't apply to it. It provides
+        # the same practical utilities (ls, cat, cp, grep, sed, tar, diff,
+        # ...) as a single multi-call binary. Its own build.sh only
+        # installs the `busybox` binary itself plus an `ash` symlink --
+        # unlike coreutils' build, it does NOT create bin/ls, bin/cat, etc.
+        # It can't create those symlinks for every applet at CI build time
+        # either: `busybox --install -s` needs to actually RUN the
+        # binary to read its own compiled-in applet list, and this is an
+        # aarch64 binary built on an x86_64 CI host. That step instead
+        # belongs in HermesRuntime's on-device first-run setup, run
+        # natively on the tablet's real CPU: `busybox --install -s
+        # $PREFIX/bin` right after extracting the bootstrap.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/PACKAGES+=("coreutils")/PACKAGES+=("busybox")/' scripts/build-bootstraps.sh
+          grep -qx '		PACKAGES+=("busybox")' scripts/build-bootstraps.sh
 
       - name: Fix Android SDK directory permissions inside the builder container
         # Reproduced identically on two separate runs: termux-am (a hard
