@@ -122,7 +122,7 @@ jobs:
         # verbatim on a retry). chmod it before the real build starts.
         working-directory: termux-packages-src
         run: |
-          ./scripts/run-docker.sh bash -c '
+          ./scripts/run-docker.sh sudo bash -c '
             for d in /home/builder/lib/android-sdk-*; do
               [ -d "$d" ] && chmod -R a+rwx "$d" && echo "chmod: $d"
             done
