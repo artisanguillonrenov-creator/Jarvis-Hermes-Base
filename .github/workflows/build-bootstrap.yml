@@ -1,0 +1,125 @@
+name: Android Termux Bootstrap
+
+# Builds a custom Termux-style bootstrap (Python 3.13, aarch64 only) for
+# TERMUX_APP_PACKAGE=com.hermes.android, per the Android directives doc.
+# Termux's own prebuilt bootstraps/debs are compiled with the app package
+# name baked into absolute paths (/data/data/com.termux/files/usr), so they
+# cannot be reused under a different package name — every package has to be
+# rebuilt from source with that path changed, which is what this workflow
+# does using termux-packages' own build system in Docker.
+#
+# Pinned to commit 799060131390c7c8f9b1d93a455061e8736d847a: the last
+# commit in termux/termux-packages where packages/python/build.sh still
+# builds Python 3.13.13, one commit before "bump(main/python): 3.14"
+# (b4bbc294d9e6b934bcc901c4846a641589e9f586). Hermès requires
+# >=3.11,<3.14 (see pyproject.toml) and Termux's current default is 3.14 —
+# exactly the trap the directives call out.
+#
+# This is a genuinely heavy build: rust's TERMUX_PKG_DEPENDS pulls in
+# clang/libllvm/lld, so building rust for a new app package name can mean
+# compiling LLVM from source too. termux-generator's own docs cite ~3
+# hours as a best case for a much shorter package list. GitHub's hard
+# ceiling for a hosted-runner job is 6 hours regardless of timeout-minutes
+# — this may not fit in one run. To survive that, the built .deb output
+# and downloaded upstream sources are cached and carried into the next
+# run (build-package.sh skips a package it already built), so re-running
+# this workflow after a timeout resumes rather than starting over.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-bootstrap
+  cancel-in-progress: false
+
+env:
+  TERMUX_PACKAGES_COMMIT: '799060131390c7c8f9b1d93a455061e8736d847a'
+  TERMUX_APP_PACKAGE: 'com.hermes.android'
+  TERMUX_BOOTSTRAP_PACKAGES: 'python,openssl,libffi,rust,libsqlite'
+
+jobs:
+  build:
+    name: build-bootstraps.sh (aarch64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # GitHub's own per-job ceiling for hosted runners — see note above.
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/az /usr/local/share/boost /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
+
+      - name: Clone termux-packages (pinned)
+        run: |
+          git clone https://github.com/termux/termux-packages.git termux-packages-src
+          cd termux-packages-src
+          git checkout "$TERMUX_PACKAGES_COMMIT"
+
+      - name: Restore built-package cache (resume across runs)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: termux-packages-src/output
+          key: termux-bootstrap-output-${{ env.TERMUX_APP_PACKAGE }}-${{ env.TERMUX_PACKAGES_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            termux-bootstrap-output-${{ env.TERMUX_APP_PACKAGE }}-${{ env.TERMUX_PACKAGES_COMMIT }}-
+
+      - name: Restore upstream source download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.termux-build
+          key: termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-
+
+      - name: Patch the app package name
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"\$/TERMUX_APP__PACKAGE_NAME=\"$TERMUX_APP_PACKAGE\"/" scripts/properties.sh
+          sed -i "s/^TERMUX_APP__NAMESPACE=\"com.termux\"\$/TERMUX_APP__NAMESPACE=\"$TERMUX_APP_PACKAGE\"/" scripts/properties.sh
+          grep -qx "TERMUX_APP__PACKAGE_NAME=\"$TERMUX_APP_PACKAGE\"" scripts/properties.sh
+          grep -qx "TERMUX_APP__NAMESPACE=\"$TERMUX_APP_PACKAGE\"" scripts/properties.sh
+          echo "Patched app package name to $TERMUX_APP_PACKAGE:"
+          grep -n "TERMUX_APP__PACKAGE_NAME=\|TERMUX_APP__NAMESPACE=" scripts/properties.sh
+
+      - name: Build the aarch64 bootstrap in Docker
+        working-directory: termux-packages-src
+        env:
+          CI: 'true'
+        run: |
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+            --architectures aarch64 \
+            --add "$TERMUX_BOOTSTRAP_PACKAGES"
+
+      - name: Locate the bootstrap archive
+        id: bootstrap
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          if [ ! -f bootstrap-aarch64.zip ]; then
+            echo "::error::bootstrap-aarch64.zip was not produced by build-bootstraps.sh"
+            exit 1
+          fi
+          echo "path=termux-packages-src/bootstrap-aarch64.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bootstrap as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-android-bootstrap-aarch64
+          path: ${{ steps.bootstrap.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish (or replace) the rolling bootstrap release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: android-bootstrap-latest
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" "${{ steps.bootstrap.outputs.path }}" \
+            -R "$GITHUB_REPOSITORY" \
+            --title "Hermès Android Termux bootstrap (aarch64, Python 3.13)" \
+            --notes "Custom Termux bootstrap for $TERMUX_APP_PACKAGE, built from termux-packages@$TERMUX_PACKAGES_COMMIT (run ${GITHUB_RUN_NUMBER}). Packages: $TERMUX_BOOTSTRAP_PACKAGES (+ their dependencies)."
