@@ -21,6 +21,65 @@ via GitHub Actions puisque cet environnement n'a ni tablette ni SDK Android
 locaux). Ce nom ne doit plus être rediscuté ni changé sans une raison
 bloquante réelle (le bootstrap Python de la Phase 2 en dépend).
 
+## Révision : le dashboard web réel, pas une UI native reconstruite
+
+`CORTANA_DIRECTIVES_CLAUDE_CODE_APPLICATION_INSTALLABLE_1.md` (dans la même
+conversation) a changé l'architecture de l'écran principal : Cortana ne
+réimplémente plus les écrans Hermes en Compose — elle lance `hermes
+dashboard` (pas `hermes serve`) et affiche le vrai dashboard web
+(StatusPage/ConfigPage/**EnvPage**/ChatPage, avec le vrai `hermes --tui` via
+pont PTY) dans une simple `WebView`. Vérifié dans le vrai dépôt avant de
+coder :
+
+- `--no-open` est un vrai flag de `hermes dashboard`
+  (`hermes_cli/subcommands/dashboard.py`) : `action="store_true", help="Don't
+  open browser automatically"`.
+- `HERMES_SERVE_HEADLESS` est bien ce qui désactive `mount_spa()` — confirmé
+  dans `hermes_cli/main_dashboard.py` (`"serve` sets HERMES_SERVE_HEADLESS so
+  mount_spa() stays off") et `hermes_cli/web_server.py`. `TermuxLikeHermesRuntime`
+  ne positionne donc plus cette variable du tout.
+- `web/vite.config.ts` a déjà `outDir: "../hermes_cli/web_dist"` — construire
+  `web/` avec `npm run build --workspace web` dépose directement le dashboard
+  compilé au chemin par défaut que `--skip-build` (obligatoire ici : pas de
+  Node/npm sur l'appareil) va chercher.
+- **Écart avec la spec** : contrairement à ce qu'elle affirmait, `hermes_cli/`
+  n'a **pas** de `web_dist/` committé dans le dépôt, et
+  `[tool.setuptools.package-data]` ne référence pas non plus `web_dist/**` —
+  ce mécanisme concerne de toute façon la construction d'un wheel PyPI, pas
+  une install éditable (`pip install -e .`) comme celle que fait
+  `TermuxLikeHermesRuntime`. Conséquence concrète : le workflow CI
+  (`build-debug-apk.yml`) construit maintenant lui-même `web/` via npm et
+  copie `hermes_cli/web_dist/` dans
+  `app/src/main/assets/runtime_payload/hermes-src/hermes_cli/web_dist/` avant
+  de compiler l'APK — un vrai artefact construit, pas une supposition.
+- `ptyprocess>=0.7.0,<1` est déjà une dépendance **cœur** de `pyproject.toml`
+  (pas seulement de l'extra `termux`), donc rien à ajouter côté Python pour
+  la neuvième vérification `check_pty` du `healthcheck.py`.
+- `web/src/pages/EnvPage.tsx` gère déjà la config provider par groupe
+  (clé, base URL, OAuth) de façon complète — confirmé en lisant le fichier.
+  L'écran natif Kotlin `ProviderConfigScreen`/`TemporaryPlainEnvProviderConfig`
+  du Chantier 0.5 est donc **supprimé** (pas juste laissé de côté) : il
+  dupliquait une fonctionnalité qui existe déjà, mieux faite, côté web.
+
+**Conséquence sur l'UI** : `MainActivity` n'a plus qu'un écran principal
+(`DashboardScreen`, la `WebView`) plus un texte de statut pendant le
+démarrage. L'ancien `TechnicalScreen` (les 13 boutons du Chantier 0.5) est
+conservé tel quel comme **outil de diagnostic interne**, atteignable depuis
+l'état de chargement/erreur de `DashboardScreen` — ce n'est plus le chemin de
+validation principal (§7 de la nouvelle spec : "Il décrit ce qu'il voit dans
+le dashboard... plutôt que de suivre une checklist de boutons artificiels").
+
+**Ce qui manque encore pour que ça tourne réellement** (inchangé dans son
+fond, précisé dans son détail) : le reste de l'arborescence source Python de
+Hermes (`agent/`, `hermes_cli/*.py`, `tui_gateway/`, `pyproject.toml`, etc.)
+n'est toujours pas embarqué dans `assets/runtime_payload/hermes-src/` — seul
+`hermes_cli/web_dist/` (construit réellement en CI) l'est désormais. Sans le
+reste du code source, `pip install -e ".[termux]"` n'a rien sur quoi
+s'installer, indépendamment des binaires natifs Python (toujours absents,
+Phase 2, voir plus bas). Ce n'est pas un oubli — la spec elle-même reporte le
+bootstrap Python complet à une Phase 2 distincte (CI + Docker, plusieurs
+heures), pas encore commencée.
+
 ## Documents de contexte
 
 Cette PR est la suite de trois documents (produits et validés par William +
@@ -97,9 +156,15 @@ détail complet, honnête, de ce qui a et n'a pas été vérifié.
 
 ## Build
 
-**En local**, si vous avez un SDK Android :
+**En local**, si vous avez un SDK Android — construire d'abord le dashboard
+web (une fois, ou à chaque changement sous `web/`), sinon `hermes dashboard
+--skip-build` ne trouvera pas de dashboard à servir sur l'appareil :
 
 ```
+npm install --workspace web
+npm run build --workspace web   # dépose hermes_cli/web_dist/ (voir web/vite.config.ts)
+mkdir -p proof-of-architecture/app/src/main/assets/runtime_payload/hermes-src/hermes_cli
+cp -r hermes_cli/web_dist proof-of-architecture/app/src/main/assets/runtime_payload/hermes-src/hermes_cli/web_dist
 cd proof-of-architecture
 ./gradlew :app:assembleDebug
 ```

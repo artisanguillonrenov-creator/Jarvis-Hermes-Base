@@ -35,6 +35,35 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      # Builds the real Hermes web dashboard (StatusPage/ConfigPage/EnvPage/ChatPage) so the app
+      # can bundle it and run `hermes dashboard --skip-build` on-device, where there is no
+      # Node/npm to build it. Vite's own config (web/vite.config.ts) already outputs straight to
+      # hermes_cli/web_dist — the exact path `--skip-build` looks for by default.
+      - name: Build the Hermes web dashboard
+        working-directory: .
+        run: |
+          npm install --workspace web
+          npm run build --workspace web
+
+      # This stages ONLY the dashboard's built assets, not the rest of the Hermes Python source
+      # tree (agent/, hermes_cli/*.py, tui_gateway/, pyproject.toml, ...) — that full source tree,
+      # needed for `pip install -e ".[termux]"` to work at all, still isn't bundled by this PR.
+      # See proof-of-architecture/README.md for that larger documented gap (it depends on Phase 2's
+      # native Python bootstrap landing first).
+      - name: Stage the built web dashboard into the app's assets
+        working-directory: .
+        run: |
+          set -euo pipefail
+          test -f hermes_cli/web_dist/index.html
+          mkdir -p proof-of-architecture/app/src/main/assets/runtime_payload/hermes-src/hermes_cli
+          rm -rf proof-of-architecture/app/src/main/assets/runtime_payload/hermes-src/hermes_cli/web_dist
+          cp -r hermes_cli/web_dist proof-of-architecture/app/src/main/assets/runtime_payload/hermes-src/hermes_cli/web_dist
+
       # GitHub-hosted ubuntu-latest runners ship a full, pre-licensed Android SDK
       # already (ANDROID_HOME/ANDROID_SDK_ROOT are pre-set) — no separate SDK
       # install action needed. (android-actions/setup-android@v3 was tried here
@@ -75,4 +104,4 @@ jobs:
           gh release create "${{ steps.tag.outputs.tag }}" "$APK_PATH" \
             --repo "${{ github.repository }}" \
             --title "Cortana spike debug APK — ${{ steps.tag.outputs.tag }}" \
-            --notes "Debug APK built from commit ${{ github.sha }} on branch ${{ github.ref_name }}. Runtime install/native-healthcheck may still fail on-device — see proof-of-architecture/README.md for the documented native-binary gap. Install by opening this release page in the tablet's browser and downloading the .apk asset."
+            --notes "Debug APK built from commit ${{ github.sha }} on branch ${{ github.ref_name }}. Bundles the real built Hermes web dashboard (hermes_cli/web_dist), but not yet the rest of the Hermes Python source tree or the native Python/Termux bootstrap — runtime install/native-healthcheck will still fail on-device until Phase 2 lands. See proof-of-architecture/README.md for the documented gaps. Install by opening this release page in the tablet's browser and downloading the .apk asset."

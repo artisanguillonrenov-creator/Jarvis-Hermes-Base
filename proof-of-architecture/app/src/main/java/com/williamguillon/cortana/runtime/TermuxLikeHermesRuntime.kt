@@ -5,7 +5,9 @@ import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.ServerSocket
+import java.net.URL
 import java.util.concurrent.TimeUnit
 
 /**
@@ -15,6 +17,14 @@ import java.util.concurrent.TimeUnit
  * (plus its readable Python payload) under assets/runtime_payload/.
  *
  * Nothing here binds to anything other than 127.0.0.1, ever (spec §4.1 step 4).
+ *
+ * Per the "application installable" revision of the spec, [start] launches `hermes dashboard`
+ * (the real web UI — StatusPage/ConfigPage/EnvPage/ChatPage — the same one desktop users get),
+ * not `hermes serve`: `serve` sets `HERMES_SERVE_HEADLESS`, which explicitly disables the SPA
+ * mount server-side (verified in `hermes_cli/web_server.py` / `hermes_cli/main_dashboard.py`).
+ * [dashboardHttpUrl] is what the app's WebView loads once [start] returns. The JSON-RPC/WS
+ * client ([baseUrl], used by the technical screen) still works against this same process — the
+ * dashboard and serve commands share one gateway handler, dashboard just also mounts the SPA.
  */
 class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
 
@@ -25,6 +35,9 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
 
     override val baseUrl: String
         get() = "ws://127.0.0.1:${handle?.port ?: 0}"
+
+    val dashboardHttpUrl: String
+        get() = "http://127.0.0.1:${handle?.port ?: 0}"
 
     override suspend fun start(): RuntimeHandle = withContext(Dispatchers.IO) {
         installRuntime()
@@ -65,14 +78,17 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
     }
 
     /**
-     * Steps 4-5 of spec §4.1. Does NOT re-check the native healthcheck gate itself — callers
-     * (namely [start]) are responsible for that; the technical screen only reaches this after its
-     * own "Vérifier extensions natives" step has passed (spec §4.4 point 5: "n'avance que si
-     * l'étape 4 est passée").
+     * Steps 4-5 of spec §4.1: launches `hermes dashboard` and waits for it to actually answer on
+     * its HTTP port before returning — a spawned process is not the same as a ready server, and
+     * callers (the main dashboard screen, the technical screen) both need "ready", not just
+     * "started". Does NOT re-check the native healthcheck gate itself — callers (namely [start])
+     * are responsible for that; the technical screen only reaches this after its own "Vérifier
+     * extensions natives" step has passed (spec §4.4 point 5: "n'avance que si l'étape 4 est
+     * passée").
      */
     suspend fun startBackendProcess(): RuntimeHandle = withContext(Dispatchers.IO) {
         val port = findFreeLoopbackPort()
-        val proc = launchHeadlessBackend(port)
+        val proc = launchDashboard(port)
         process = proc
 
         val newHandle = RuntimeHandle(
@@ -81,6 +97,12 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
             startedAtMs = System.currentTimeMillis(),
         )
         handle = newHandle
+        if (!waitForDashboardReady(port)) {
+            throw HermesRuntimeException(
+                step = "start_hermes",
+                message = "hermes dashboard did not answer on 127.0.0.1:$port in time",
+            )
+        }
         newHandle
     }
 
@@ -171,23 +193,50 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
         }
     }
 
-    private fun launchHeadlessBackend(port: Int): Process {
+    /**
+     * `dashboard`, not `serve` — deliberately does NOT set `HERMES_SERVE_HEADLESS` (that flag is
+     * what turns the SPA mount off). `--no-open` and `--skip-build` are real flags on `hermes
+     * dashboard` (verified in `hermes_cli/subcommands/dashboard.py`): `--no-open` skips
+     * `webbrowser.open()` (meaningless on Android anyway), `--skip-build` is required because
+     * there is no Node/npm on this runtime to build the web UI on-device — `hermes_cli/web_dist/`
+     * must already exist in the extracted source tree (see top-level README's documented gap:
+     * this PR does not yet bundle the full Hermes source tree, `web_dist` included).
+     */
+    private fun launchDashboard(port: Int): Process {
         val hermesHome = RuntimePaths.hermesHome(ctx)
         val env = mapOf(
             "HERMES_HOME" to hermesHome.absolutePath,
-            "HERMES_SERVE_HEADLESS" to "1",
             "ANDROID_API_LEVEL" to Build.VERSION.SDK_INT.toString(),
             "HOME" to ctx.filesDir.absolutePath,
         )
         val command = listOf(
             RuntimePaths.pythonBinary(ctx).absolutePath, "-m", "hermes_cli.main",
-            "serve", "--isolated", "--host", "127.0.0.1", "--port", port.toString(),
+            "dashboard", "--isolated", "--no-open", "--skip-build",
+            "--host", "127.0.0.1", "--port", port.toString(),
         )
         val builder = ProcessBuilder(command)
             .directory(RuntimePaths.hermesSrcDir(ctx))
             .redirectErrorStream(true)
         builder.environment().putAll(env)
         return builder.start()
+    }
+
+    /** Polls the dashboard's own HTTP port until it answers, rather than guessing a fixed delay. */
+    private fun waitForDashboardReady(port: Int, timeoutMs: Long = 60_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (process?.isAlive != true) return false
+            val reachable = runCatching {
+                (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 1000
+                    readTimeout = 1000
+                    requestMethod = "GET"
+                }.responseCode in 200..499 // any real HTTP response means the server is up
+            }.getOrDefault(false)
+            if (reachable) return true
+            Thread.sleep(500)
+        }
+        return false
     }
 
     /**

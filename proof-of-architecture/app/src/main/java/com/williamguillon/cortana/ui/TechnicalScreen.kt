@@ -23,18 +23,21 @@ import com.williamguillon.cortana.diagnostics.DiagnosticExporter
 
 /**
  * Buttons only, in spec order (§4.4). Deliberately ugly (spec §0: "L'UI peut être laide" —
- * this is a measurement spike, not production Cortana UI).
+ * this is a measurement spike, not production Cortana UI). Internal diagnostic tool only, kept
+ * for testing the runtime/gateway independently of the real dashboard — see [DashboardScreen] for
+ * the normal user flow. Provider/API-key configuration is no longer done here: Hermes's own web
+ * dashboard already has a full EnvPage for that (`web/src/pages/EnvPage.tsx`), so a native
+ * Kotlin provider form here would just duplicate it.
  */
 @Composable
-fun TechnicalScreen(onOpenProviderConfig: () -> Unit) {
+fun TechnicalScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
     val vm: TechnicalViewModel = viewModel()
     val status by vm.status.collectAsState()
     val log by vm.log.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("1. Provider form")
-        Button(onClick = onOpenProviderConfig) { Text("Formulaire provider") }
+        Button(onClick = onBack) { Text("← Retour au dashboard") }
         Divider(Modifier.padding(vertical = 8.dp))
 
         Text("2. Runtime status: $status")

@@ -49,6 +49,12 @@ def check_websockets():
     import websockets  # noqa: F401
 
 
+def check_pty():
+    import ptyprocess
+    p = ptyprocess.PtyProcessUnicode.spawn(["/bin/sh", "-c", "echo probe"])
+    p.read()
+
+
 def check_httpx_certifi():
     import certifi, httpx  # noqa: F401
 
@@ -61,6 +67,9 @@ results = [
     check("uvloop", False, check_uvloop),        # optional uvicorn accelerator — pure-asyncio fallback if absent
     check("httptools", False, check_httptools),  # optional uvicorn accelerator — h11 fallback if absent
     check("websockets", True, check_websockets),
+    # The dashboard's chat page depends on a real PTY bridge (hermes_cli/pty_bridge.py) — without
+    # one, the dashboard starts but its embedded terminal never works, so this is fatal too.
+    check("pty", True, check_pty),
     check("httpx_certifi", True, check_httpx_certifi),
 ]
 
