@@ -10,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import com.williamguillon.cortana.config.ProviderConfigScreen
 import com.williamguillon.cortana.runtime.RuntimePaths
 import com.williamguillon.cortana.ui.TechnicalScreen
@@ -24,7 +25,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun ProofOfArchitectureRoot() {
-    val envAlreadyConfigured = remember { RuntimePaths.envFile(androidx.compose.ui.platform.LocalContext.current).exists() }
+    val ctx = LocalContext.current
+    val envAlreadyConfigured = remember { RuntimePaths.envFile(ctx).exists() }
     var showProviderConfig by remember { mutableStateOf(!envAlreadyConfigured) }
 
     MaterialTheme {

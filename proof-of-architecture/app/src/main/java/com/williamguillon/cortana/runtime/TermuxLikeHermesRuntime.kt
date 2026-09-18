@@ -199,6 +199,10 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
     private fun findFreeLoopbackPort(): Int =
         ServerSocket(0).use { it.localPort }
 
-    private fun processPidOrMinusOne(process: Process): Int =
-        runCatching { process.pid().toInt() }.getOrDefault(-1)
+    // Process.pid() (java.lang.Process, API 26+) isn't resolvable against this project's compile
+    // SDK stub, so it's called reflectively rather than as a typed member — the method exists at
+    // runtime on API 26+ regardless of what the compile-time stub declares.
+    private fun processPidOrMinusOne(process: Process): Int = runCatching {
+        (process.javaClass.getMethod("pid").invoke(process) as Long).toInt()
+    }.getOrDefault(-1)
 }
