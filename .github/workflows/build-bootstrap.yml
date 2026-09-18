@@ -152,6 +152,28 @@ jobs:
           sed -i 's/^TERMUX_PKG_SHA256=4e6131cc859ec6a36569f1978cf3617cc3836a681d13d228ded1b4885dab7770$/TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3/' x11-packages/foot/build.sh
           grep -qx 'TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3' x11-packages/foot/build.sh
 
+      - name: Patch build-bootstraps.sh's stale 'bzip2' package name
+        # Reproduced 2026-09-18 (run #8, ~1h10 into the real build — bash
+        # compiled fine, then the very next default bootstrap package
+        # failed): scripts/build-bootstraps.sh's default PACKAGES list still
+        # requests "bzip2" as a standalone package, but at this pinned
+        # commit bzip2 has been refactored into a SUBPACKAGE of libbz2
+        # (packages/libbz2/bzip2.subpackage.sh) — there is no more
+        # packages/bzip2/build.sh. build-package.sh only resolves package
+        # DIRECTORIES for its top-level build target, not subpackage names,
+        # so it fails with "No package bzip2 found in any of the enabled
+        # repositories". Building "libbz2" instead produces both the
+        # libbz2 AND bzip2 .deb files in one pass (that's what a
+        # subpackage is), and build-bootstraps.sh's extract_debs() scans
+        # and extracts every .deb it finds in the output dir regardless of
+        # what name was originally requested — so the bzip2 binary still
+        # ends up in the final bootstrap unchanged.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/PACKAGES+=("bzip2")/PACKAGES+=("libbz2")/' scripts/build-bootstraps.sh
+          grep -qx '		PACKAGES+=("libbz2")' scripts/build-bootstraps.sh
+
       - name: Fix Android SDK directory permissions inside the builder container
         # Reproduced identically on two separate runs: termux-am (a hard
         # dependency of bash, one of build-bootstraps.sh's own default
