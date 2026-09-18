@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.ui
+package com.williamguillon.cortana.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,7 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.cortana.proofofarchitecture.diagnostics.DiagnosticExporter
+import com.williamguillon.cortana.diagnostics.DiagnosticExporter
 
 /**
  * Buttons only, in spec order (§4.4). Deliberately ugly (spec §0: "L'UI peut être laide" —

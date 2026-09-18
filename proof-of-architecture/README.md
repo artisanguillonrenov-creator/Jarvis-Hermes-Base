@@ -12,6 +12,15 @@ Ce module n'est pas la version finale de Cortana. Voir le document de tâche
 conversation ayant produit cette PR) pour le contexte complet et les décisions
 actées à trois (William, Claude architecture, ChatGPT).
 
+**Nom de paquet verrouillé : `com.williamguillon.cortana`.** Utilisé partout
+(namespace/applicationId Gradle, manifest, autorité du `FileProvider`) — voir
+`CORTANA_DIRECTIVES_CLAUDE_CODE_APPLICATION_INSTALLABLE.md` (document qui
+remplace, pour tout ce qui concerne le livrable, la logique "PR + rapport de
+diagnostic" ci-dessous par "APK installable publié en release GitHub", produit
+via GitHub Actions puisque cet environnement n'a ni tablette ni SDK Android
+locaux). Ce nom ne doit plus être rediscuté ni changé sans une raison
+bloquante réelle (le bootstrap Python de la Phase 2 en dépend).
+
 ## Documents de contexte
 
 Cette PR est la suite de trois documents (produits et validés par William +
@@ -88,20 +97,26 @@ détail complet, honnête, de ce qui a et n'a pas été vérifié.
 
 ## Build
 
+**En local**, si vous avez un SDK Android :
+
 ```
 cd proof-of-architecture
 ./gradlew :app:assembleDebug
 ```
 
-Non exécuté par cette session (pas de SDK Android configuré : `ANDROID_HOME`
-est vide dans cet environnement). Une tentative a été faite malgré tout :
-`gradle :app:tasks` en mode `--offline` échoue proprement sur l'absence du
-plugin AGP en cache (attendu, aucune surprise) ; en mode connecté, la
-résolution avance nettement plus loin (le plugin AGP 8.5.2 et le début de son
-arbre de dépendances Maven Central se résolvent) mais finit par buter sur des
-`429 Too Many Requests` du proxy réseau de cet environnement avant d'avoir pu
-télécharger la totalité de l'arbre de dépendances de l'AGP — donc ni succès ni
-échec de compilation à rapporter, seulement une limite d'infrastructure de
-cette session. À vérifier par un contributeur disposant d'un SDK Android et
-d'un accès réseau normal avant de considérer le module lui-même exempt
-d'erreurs de compilation Kotlin/Gradle.
+Non exécuté avec succès depuis cet environnement de développement (pas de SDK
+Android configuré : `ANDROID_HOME` est vide ici, et le proxy réseau de ce
+bac à sable a fini par répondre `429 Too Many Requests` en pleine résolution
+de l'arbre de dépendances de l'AGP lors d'une tentative). C'est précisément
+pour ça que le build réel passe par CI (voir ci-dessous), pas par cet
+environnement.
+
+**En CI** (méthode retenue pour produire un APK réellement installable) : le
+workflow `.github/workflows/build-debug-apk.yml` installe le JDK et le SDK
+Android en ligne de commande sur un runner GitHub Actions, lance
+`./gradlew assembleDebug`, et — s'il réussit — publie l'APK en asset d'une
+release GitHub taguée `spike-apk-YYYYMMDD-HHmm`, téléchargeable directement
+depuis le navigateur d'une tablette (aucun PC, aucun ADB). S'il échoue, le job
+échoue visiblement avec le log complet accessible depuis l'onglet Actions du
+dépôt. Voir la description de la PR pour le lien vers le run le plus récent et
+son résultat réel.

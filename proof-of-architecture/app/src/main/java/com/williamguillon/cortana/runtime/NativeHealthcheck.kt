@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.runtime
+package com.williamguillon.cortana.runtime
 
 import org.json.JSONArray
 import org.json.JSONObject

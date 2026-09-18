@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.runtime
+package com.williamguillon.cortana.runtime
 
 /**
  * Abstraction over "a running Hermes backend on this device". Nothing outside this package

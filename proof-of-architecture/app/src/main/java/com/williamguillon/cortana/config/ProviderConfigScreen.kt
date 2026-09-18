@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.config
+package com.williamguillon.cortana.config
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,7 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.cortana.proofofarchitecture.runtime.RuntimePaths
+import com.williamguillon.cortana.runtime.RuntimePaths
 
 /**
  * First-launch (or technical-screen-accessible) provider setup. See

@@ -1,7 +1,7 @@
-package com.cortana.proofofarchitecture.db
+package com.williamguillon.cortana.db
 
 import android.database.sqlite.SQLiteDatabase
-import com.cortana.proofofarchitecture.runtime.RuntimePaths
+import com.williamguillon.cortana.runtime.RuntimePaths
 import android.content.Context
 import java.io.File
 

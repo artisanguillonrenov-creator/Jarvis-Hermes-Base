@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.runtime
+package com.williamguillon.cortana.runtime
 
 import android.content.Context
 import java.io.File

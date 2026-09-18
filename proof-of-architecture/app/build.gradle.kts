@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.cortana.proofofarchitecture"
+    namespace = "com.williamguillon.cortana"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.cortana.proofofarchitecture"
+        applicationId = "com.williamguillon.cortana"
         // Samsung Galaxy Tab A11 ships arm64-v8a; that is the only ABI this spike targets.
         minSdk = 26
         targetSdk = 34

@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.rpc
+package com.williamguillon.cortana.rpc
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout

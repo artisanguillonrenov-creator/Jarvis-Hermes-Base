@@ -1,17 +1,17 @@
-package com.cortana.proofofarchitecture.ui
+package com.williamguillon.cortana.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.cortana.proofofarchitecture.db.WalChecker
-import com.cortana.proofofarchitecture.diagnostics.DiagnosticExporter
-import com.cortana.proofofarchitecture.diagnostics.DiagnosticReportBuilder
-import com.cortana.proofofarchitecture.diagnostics.DiagnosticStep
-import com.cortana.proofofarchitecture.diagnostics.StepStatus
-import com.cortana.proofofarchitecture.rpc.GatewayCallResult
-import com.cortana.proofofarchitecture.rpc.HermesGatewayClient
-import com.cortana.proofofarchitecture.runtime.HermesRuntimeException
-import com.cortana.proofofarchitecture.runtime.TermuxLikeHermesRuntime
+import com.williamguillon.cortana.db.WalChecker
+import com.williamguillon.cortana.diagnostics.DiagnosticExporter
+import com.williamguillon.cortana.diagnostics.DiagnosticReportBuilder
+import com.williamguillon.cortana.diagnostics.DiagnosticStep
+import com.williamguillon.cortana.diagnostics.StepStatus
+import com.williamguillon.cortana.rpc.GatewayCallResult
+import com.williamguillon.cortana.rpc.HermesGatewayClient
+import com.williamguillon.cortana.runtime.HermesRuntimeException
+import com.williamguillon.cortana.runtime.TermuxLikeHermesRuntime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

@@ -1,7 +1,7 @@
-package com.cortana.proofofarchitecture.config
+package com.williamguillon.cortana.config
 
 import android.content.Context
-import com.cortana.proofofarchitecture.runtime.RuntimePaths
+import com.williamguillon.cortana.runtime.RuntimePaths
 import java.io.File
 
 /**

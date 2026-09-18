@@ -1,9 +1,9 @@
-package com.cortana.proofofarchitecture.diagnostics
+package com.williamguillon.cortana.diagnostics
 
 import android.content.Context
 import android.os.Build
-import com.cortana.proofofarchitecture.runtime.NativeHealthcheckResult
-import com.cortana.proofofarchitecture.runtime.RuntimePaths
+import com.williamguillon.cortana.runtime.NativeHealthcheckResult
+import com.williamguillon.cortana.runtime.RuntimePaths
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

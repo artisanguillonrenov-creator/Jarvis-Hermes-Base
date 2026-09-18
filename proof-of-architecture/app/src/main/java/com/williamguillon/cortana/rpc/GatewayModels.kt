@@ -1,4 +1,4 @@
-package com.cortana.proofofarchitecture.rpc
+package com.williamguillon.cortana.rpc
 
 /** One `event` frame's `params`: `{"type": ..., "session_id": ..., "payload": {...}}` (tui_gateway/server.py). */
 data class GatewayEvent(
