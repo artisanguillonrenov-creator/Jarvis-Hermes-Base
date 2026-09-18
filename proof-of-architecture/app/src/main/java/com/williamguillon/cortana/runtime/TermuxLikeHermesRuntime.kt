@@ -100,7 +100,7 @@ class TermuxLikeHermesRuntime(private val ctx: Context) : HermesRuntime {
         proc != null && proc.isAlive
     }
 
-    /** Copies assets/runtime_payload/** into filesDir/runtime/, once. See that dir's README. */
+    /** Copies everything under assets/runtime_payload/ into filesDir/runtime/, once. See that dir's README. */
     private fun extractBootstrapIfNeeded() {
         val marker = RuntimePaths.extractedMarker(ctx)
         if (marker.exists()) return

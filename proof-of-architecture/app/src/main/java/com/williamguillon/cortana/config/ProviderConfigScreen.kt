@@ -13,6 +13,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +31,7 @@ import com.williamguillon.cortana.runtime.RuntimePaths
  * TemporaryPlainEnvProviderConfig.kt: this is explicitly provisional plaintext storage, not
  * final Cortana credential handling.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProviderConfigScreen(onSaved: () -> Unit) {
     val ctx = LocalContext.current
