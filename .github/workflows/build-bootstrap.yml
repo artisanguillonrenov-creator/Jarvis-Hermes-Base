@@ -230,6 +230,38 @@ jobs:
             done
           '
 
+      - name: Harden the builder container's NSS config against permission-check hangs
+        # Every hang reproduced so far (runs #9-#14, 2026-09-18) lands right
+        # after openssl finishes, going into coreutils' gnulib configure --
+        # and every specific line it's frozen on so far (fu_cv_sys_stat_*,
+        # ac_cv_func_getgroups_works, eaccess) is a permission/identity
+        # syscall that gnulib probes by actually compiling and running a
+        # tiny test program, not by a header-only check. getgroups/eaccess
+        # style calls can go through NSS (Name Service Switch); if
+        # /etc/nsswitch.conf in this builder image references anything
+        # beyond local files (ldap, winbind, systemd-based lookups) for
+        # passwd/group, a lookup can block on an unreachable service
+        # instead of erroring immediately -- an unverified but well-known
+        # class of cause for exactly this "compiles, runs, then just never
+        # returns" symptom. This is a safe, no-op-if-unneeded hardening for
+        # a throwaway CI container regardless: force passwd/group/shadow to
+        # resolve from local files only, which is always instant and is
+        # all a minimal build container needs anyway. Written to the
+        # container's real filesystem, so (unlike a shell ulimit set in
+        # this same docker-exec session) it persists into the later,
+        # separate docker-exec session that runs the actual build.
+        working-directory: termux-packages-src
+        run: |
+          ./scripts/run-docker.sh sudo bash -c '
+            printf "%s\n" \
+              "passwd: files" \
+              "group: files" \
+              "shadow: files" \
+              "hosts: files dns" \
+              > /etc/nsswitch.conf
+            cat /etc/nsswitch.conf
+          '
+
       - name: Build the default bootstrap utilities in Docker
         # Reproduced three times (runs #9, #10, #11, 2026-09-18): the build
         # silently hangs -- zero new output, process never returns -- a few
