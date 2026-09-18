@@ -104,6 +104,22 @@ jobs:
           restore-keys: |
             termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-
 
+      - name: Patch run-docker.sh to drop the AppArmor security-opt
+        # Removing apparmor_parser (see the "Disable AppArmor" step) stops
+        # run-docker.sh from panicking while COMPILING the profile, but
+        # docker run itself still unconditionally passes
+        # `--security-opt apparmor=_custom-termux-package-builder-<name>`
+        # on Linux — and since that named profile was never loaded, `docker
+        # run` fails: "apparmor failed to apply profile: ... no such file
+        # or directory". Drop just that one --security-opt; keep seccomp/
+        # cap-add/--device as-is (aarch64 doesn't need proot, but no reason
+        # to touch what isn't broken).
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/ --security-opt apparmor=_custom-termux-package-builder-$CONTAINER_NAME//' scripts/run-docker.sh
+          grep -n 'SEC_OPT=" --security-opt seccomp' scripts/run-docker.sh
+
       - name: Patch the app package name
         working-directory: termux-packages-src
         run: |
