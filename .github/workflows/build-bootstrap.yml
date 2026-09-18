@@ -60,6 +60,17 @@ jobs:
             /opt/az /usr/local/share/boost /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h /
 
+      - name: Disable AppArmor
+        # Reproduced twice: run-docker.sh's own container bootstrap loads a
+        # restricted AppArmor profile on the HOST via apparmor_parser, which
+        # panics here ("could not restore to saved user id: Operation not
+        # permitted") — a broken apparmor_parser on this runner image, not
+        # anything in our build. run-docker.sh only calls apparmor_parser
+        # when `aa-status --enabled` succeeds, so disabling AppArmor for
+        # this disposable single-job VM makes it skip that path entirely
+        # (it prints its own warning and continues unconfined instead).
+        run: sudo systemctl stop apparmor 2>&1 || true
+
       - name: Clone termux-packages (pinned)
         run: |
           git clone https://github.com/termux/termux-packages.git termux-packages-src
