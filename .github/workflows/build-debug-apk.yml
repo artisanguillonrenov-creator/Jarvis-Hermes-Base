@@ -35,11 +35,21 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK command-line tools
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
-
-      - name: Accept Android SDK licenses (non-interactive)
-        run: yes | sdkmanager --licenses || true
+      # GitHub-hosted ubuntu-latest runners ship a full, pre-licensed Android SDK
+      # already (ANDROID_HOME/ANDROID_SDK_ROOT are pre-set) — no separate SDK
+      # install action needed. (android-actions/setup-android@v3 was tried here
+      # first and fails outright: it runs `sdkmanager tools`, and Google removed
+      # that legacy "tools" package from the SDK repository years ago — exit
+      # code 1 before Gradle even starts. Not used for that reason.)
+      - name: Accept Android SDK licenses (non-interactive, safety net)
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -maxdepth 2 -type f -name sdkmanager | sort -V | tail -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "No sdkmanager found under $SDK_ROOT/cmdline-tools — relying on Gradle/AGP's own SDK auto-download instead." >&2
+          else
+            yes | "$SDKMANAGER" --licenses || true
+          fi
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
