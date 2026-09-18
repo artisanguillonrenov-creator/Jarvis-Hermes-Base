@@ -192,47 +192,48 @@ jobs:
             done
           '
 
-      - name: Build the aarch64 bootstrap in Docker
-        # Reproduced twice (runs #9 and #10, 2026-09-18): the build silently
-        # hangs -- zero new output, process never returns -- a few checks
-        # into GNU coreutils' gnulib-generated configure script (the exact
-        # line varies slightly between runs: sys/mount.h once, __freadahead
-        # the other time), right where cross-compiling gnulib checks stop
-        # being answered from a pre-seeded cache/guess and something tries
-        # to actually execute a compiled test binary. A whole-step
-        # timeout-minutes can't safely bound this: rust pulls in LLVM and
-        # can legitimately run for well over an hour with real output the
-        # whole time. What actually distinguishes a hang from slow-but-real
-        # progress is a lack of NEW output, so watch for silence instead of
-        # total duration: kill and fail the build if nothing is printed for
-        # 15 straight minutes. A normal step failure (unlike an externally
-        # cancelled run) still lets the cache-save post-steps run, so a
-        # future hang like this preserves whatever was already built
-        # instead of losing it.
+      - name: Build the default bootstrap utilities in Docker
+        # Reproduced three times (runs #9, #10, #11, 2026-09-18): the build
+        # silently hangs -- zero new output, process never returns -- a few
+        # checks into GNU coreutils' gnulib-generated configure script (the
+        # exact line varies slightly between runs: sys/mount.h, __freadahead,
+        # struct stat.st_blocks), right where cross-compiling gnulib checks
+        # stop being answered from a pre-seeded cache/guess. An inactivity
+        # watchdog script (kill the build if its log file stops growing) was
+        # tried first but never fired even 20+ minutes past the last output
+        # line -- GitHub Actions runs step scripts with `bash -e` by default,
+        # and something in that watchdog loop likely isn't as -e/job-control
+        # safe as intended. Simpler and far more battle-tested: split into
+        # two steps and bound each with the plain `timeout` command instead
+        # of hand-rolled process/output monitoring.
+        #
+        # This step builds ONLY the default bootstrap package list (no
+        # --add), which is bash plus ~30 small, normally-fast utilities
+        # including the coreutils that hangs. None of these should
+        # legitimately take anywhere near 40 minutes, so a flat timeout
+        # here is safe (unlike the rust/LLVM step below).
         working-directory: termux-packages-src
         env:
           CI: 'true'
         run: |
-          set -uo pipefail
-          LOGFILE="$(mktemp)"
-          stdbuf -oL -eL ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+          timeout -k 60 40m ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+            --architectures aarch64
+
+      - name: Build the Hermès runtime packages (python, openssl, libffi, rust, libsqlite) and finalize
+        # Second call to build-bootstraps.sh: build-package.sh skips
+        # anything already built in the previous step (it checks for an
+        # existing output/*.deb), so this resumes straight into the
+        # packages added via --add, then re-runs extract_debs and
+        # create_bootstrap_archive to produce the final zip. rust pulls in
+        # LLVM and can legitimately run for well over an hour with real
+        # output the whole time, hence the much larger bound here.
+        working-directory: termux-packages-src
+        env:
+          CI: 'true'
+        run: |
+          timeout -k 60 180m ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
             --architectures aarch64 \
-            --add "$TERMUX_BOOTSTRAP_PACKAGES" > >(tee "$LOGFILE") 2>&1 &
-          BUILD_PID=$!
-
-          INACTIVITY_LIMIT_SECONDS=900
-          while kill -0 "$BUILD_PID" 2>/dev/null; do
-            sleep 30
-            NOW="$(date +%s)"
-            LAST_MOD="$(stat -c %Y "$LOGFILE")"
-            if (( NOW - LAST_MOD > INACTIVITY_LIMIT_SECONDS )); then
-              echo "::error::No build output for over $((INACTIVITY_LIMIT_SECONDS / 60)) minutes -- build appears hung. Killing it so the job fails cleanly (and the cache of whatever was already built gets saved) instead of hanging until the 6h ceiling."
-              kill -9 "$BUILD_PID" 2>/dev/null || true
-              exit 1
-            fi
-          done
-
-          wait "$BUILD_PID"
+            --add "$TERMUX_BOOTSTRAP_PACKAGES"
 
       - name: Locate the bootstrap archive
         id: bootstrap
