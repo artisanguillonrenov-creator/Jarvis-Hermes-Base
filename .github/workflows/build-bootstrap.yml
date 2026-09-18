@@ -61,15 +61,26 @@ jobs:
           df -h /
 
       - name: Disable AppArmor
-        # Reproduced twice: run-docker.sh's own container bootstrap loads a
-        # restricted AppArmor profile on the HOST via apparmor_parser, which
-        # panics here ("could not restore to saved user id: Operation not
-        # permitted") — a broken apparmor_parser on this runner image, not
-        # anything in our build. run-docker.sh only calls apparmor_parser
-        # when `aa-status --enabled` succeeds, so disabling AppArmor for
-        # this disposable single-job VM makes it skip that path entirely
-        # (it prints its own warning and continues unconfined instead).
-        run: sudo systemctl stop apparmor 2>&1 || true
+        # Reproduced three times: run-docker.sh's own container bootstrap
+        # loads a restricted AppArmor profile on the HOST via
+        # apparmor_parser, which panics ("could not restore to saved user
+        # id: Operation not permitted") — a broken apparmor_parser on this
+        # runner image, not anything in our build. `systemctl stop apparmor`
+        # alone did NOT stop this (the AppArmor LSM is compiled into the
+        # kernel and stays "enabled" regardless of the systemd unit's
+        # state, so run-docker.sh's `aa-status --enabled` gate kept passing
+        # and still invoked the broken tool). run-docker.sh's OTHER gate is
+        # `command -v apparmor_parser`, so remove the binary outright —
+        # that gate then fails and it skips loading profiles entirely
+        # (prints its own warning and continues unconfined instead).
+        run: |
+          P=$(command -v apparmor_parser || true)
+          if [ -n "$P" ]; then
+            sudo rm -f "$P"
+            echo "Removed $P"
+          else
+            echo "apparmor_parser not found; nothing to do"
+          fi
 
       - name: Clone termux-packages (pinned)
         run: |
