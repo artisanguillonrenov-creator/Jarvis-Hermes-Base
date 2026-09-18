@@ -27,6 +27,14 @@ name: Android Termux Bootstrap
 
 on:
   workflow_dispatch: {}
+  # GitHub only exposes workflow_dispatch via the API/UI for workflows that
+  # exist on the repo's default branch; this file lives only on our feature
+  # branch. Trigger on pushes that touch this file itself so it's both
+  # registered and (re-)runnable from here — the same pattern used by
+  # build-debug-apk.yml.
+  push:
+    paths:
+      - '.github/workflows/build-bootstrap.yml'
 
 permissions:
   contents: write
