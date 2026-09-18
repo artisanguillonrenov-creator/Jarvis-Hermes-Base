@@ -180,12 +180,11 @@ jobs:
         working-directory: termux-packages-src
         run: |
           set -euo pipefail
-          sed -i '/^ac_cv_func_getpass=yes$/a\
-fu_cv_sys_stat_statvfs=no\
-fu_cv_sys_stat_statfs2_frsize=no\
-fu_cv_sys_stat_statfs2_bsize=no\
-fu_cv_sys_stat_statfs4=no\
-fu_cv_sys_stat_statfs2_fsize=no' packages/coreutils/build.sh
+          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statvfs=no' packages/coreutils/build.sh
+          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_frsize=no' packages/coreutils/build.sh
+          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_bsize=no' packages/coreutils/build.sh
+          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs4=no' packages/coreutils/build.sh
+          sed -i '/^ac_cv_func_getpass=yes$/a fu_cv_sys_stat_statfs2_fsize=no' packages/coreutils/build.sh
           grep -qx 'fu_cv_sys_stat_statvfs=no' packages/coreutils/build.sh
           grep -qx 'fu_cv_sys_stat_statfs2_fsize=no' packages/coreutils/build.sh
           echo "Patched coreutils/build.sh's TERMUX_PKG_EXTRA_CONFIGURE_ARGS:"
