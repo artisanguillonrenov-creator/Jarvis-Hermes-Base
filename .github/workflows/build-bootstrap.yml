@@ -104,20 +104,24 @@ jobs:
           restore-keys: |
             termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-
 
-      - name: Patch run-docker.sh to drop the AppArmor security-opt
+      - name: Patch run-docker.sh's AppArmor security-opt to unconfined
         # Removing apparmor_parser (see the "Disable AppArmor" step) stops
         # run-docker.sh from panicking while COMPILING the profile, but
         # docker run itself still unconditionally passes
         # `--security-opt apparmor=_custom-termux-package-builder-<name>`
-        # on Linux — and since that named profile was never loaded, `docker
-        # run` fails: "apparmor failed to apply profile: ... no such file
-        # or directory". Drop just that one --security-opt; keep seccomp/
-        # cap-add/--device as-is (aarch64 doesn't need proot, but no reason
-        # to touch what isn't broken).
+        # on Linux, and that named profile was never loaded — "apparmor
+        # failed to apply profile: ... no such file or directory".
+        # Dropping the flag entirely (tried first) is NOT equivalent to no
+        # confinement: without an explicit apparmor security-opt, Docker
+        # applies its OWN built-in "docker-default" profile, which blocks
+        # the fuse mount apt's build needs ("fuse-overlayfs: cannot mount:
+        # Permission denied") — termux's custom profile existed precisely
+        # to allow that. The correct equivalent is an explicit
+        # `apparmor=unconfined`.
         working-directory: termux-packages-src
         run: |
           set -euo pipefail
-          sed -i 's/ --security-opt apparmor=_custom-termux-package-builder-$CONTAINER_NAME//' scripts/run-docker.sh
+          sed -i 's/--security-opt apparmor=_custom-termux-package-builder-$CONTAINER_NAME/--security-opt apparmor=unconfined/' scripts/run-docker.sh
           grep -n 'SEC_OPT=" --security-opt seccomp' scripts/run-docker.sh
 
       - name: Patch the app package name
