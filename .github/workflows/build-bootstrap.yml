@@ -46,7 +46,7 @@ concurrency:
 env:
   TERMUX_PACKAGES_COMMIT: '799060131390c7c8f9b1d93a455061e8736d847a'
   TERMUX_APP_PACKAGE: 'com.hermes.android'
-  TERMUX_BOOTSTRAP_PACKAGES: 'python,openssl,libffi,rust,libsqlite'
+  TERMUX_BOOTSTRAP_PACKAGES: 'python,openssl,libffi,rust,libsqlite,git'
 
 jobs:
   build:
