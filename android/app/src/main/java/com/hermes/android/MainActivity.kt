@@ -22,6 +22,7 @@ import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.documentfile.provider.DocumentFile
@@ -58,7 +59,15 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val callback = filePathCallback
             filePathCallback = null
-            callback?.onReceiveValue(FileChooserParams.parseResult(result.resultCode, result.data))
+            val uris = FileChooserParams.parseResult(result.resultCode, result.data)
+            // No adb on this device — a one-line Toast is the only way to tell whether
+            // the OS picker actually handed back files or not, without instrumenting a
+            // real logcat session (same "surface it on screen" pattern as HermesRuntime's
+            // startup diagnostics).
+            Toast.makeText(
+                this, "Sélecteur : ${uris?.size ?: 0} fichier(s)", Toast.LENGTH_SHORT,
+            ).show()
+            callback?.onReceiveValue(uris)
         }
 
     // The dashboard's "import folder" button has no WebView equivalent of desktop

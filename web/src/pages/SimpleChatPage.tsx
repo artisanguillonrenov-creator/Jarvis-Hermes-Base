@@ -130,6 +130,21 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Short-lived confirmation shown inline in the transcript when an attach
+  // succeeds — the chip row above the composer is easy to miss on a small
+  // screen, so a successful pick also gets an unmistakable in-chat notice.
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNotice = useCallback((message: string) => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    setNotice(message);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 4000);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    };
+  }, []);
   // Clickable "past conversations" panel — the in-page alternative to the
   // separate Sessions page, which wasn't giving the user a working path
   // back to old conversations on this build.
@@ -299,7 +314,10 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
 
   const attachImage = useCallback(
     async (file: File) => {
-      if (!sessionId) return;
+      if (!sessionId) {
+        setError("Session non connectée — réessaie dans un instant.");
+        return;
+      }
       try {
         const dataUrl = await readFileAsDataUrl(file);
         const base64 = dataUrl.split(",", 2)[1] ?? "";
@@ -312,18 +330,22 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
           ...prev,
           { id: newId(), kind: "image", name: file.name, previewUrl: dataUrl },
         ]);
+        showNotice(`${file.name} ajouté ✓`);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [gw, sessionId],
+    [gw, sessionId, showNotice],
   );
 
   // Shared by the browser-File attach path (file/folder <input> onChange) and the
   // Android folder-import bridge (which hands over raw bytes, not a File object).
   const attachFileData = useCallback(
     async (name: string, dataUrl: string, relativePath?: string) => {
-      if (!sessionId) return;
+      if (!sessionId) {
+        setError("Session non connectée — réessaie dans un instant.");
+        return;
+      }
       try {
         const res = await gw.request<{ ref_text?: string; ref_path?: string; name?: string }>(
           "file.attach",
@@ -339,11 +361,12 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             refText: res.ref_text ?? `@file:${res.ref_path ?? name}`,
           },
         ]);
+        showNotice(`${relativePath || res.name || name} ajouté ✓`);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [gw, sessionId],
+    [gw, sessionId, showNotice],
   );
 
   const attachFile = useCallback(
@@ -369,12 +392,14 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     window.__HERMES_FOLDER_IMPORT__ = {
       onFile: (f) => void attachFileDataRef.current(f.name, f.dataUrl, f.relativePath),
       onError: (message) => setError(message),
-      onDone: () => {},
+      onDone: (count) => {
+        if (count > 0) showNotice(`${count} fichier(s) importé(s) du dossier ✓`);
+      },
     };
     return () => {
       delete window.__HERMES_FOLDER_IMPORT__;
     };
-  }, []);
+  }, [showNotice]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => {
@@ -593,6 +618,11 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             );
           })}
         </div>
+        {notice && (
+          <div className="mx-auto mt-4 max-w-3xl rounded-lg border border-border bg-muted px-3 py-2 text-center text-xs text-muted-foreground">
+            {notice}
+          </div>
+        )}
         {error && (
           <div className="mx-auto mt-4 max-w-3xl rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {error}
@@ -635,7 +665,12 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             multiple
             className="hidden"
             onChange={(e) => {
-              Array.from(e.target.files ?? []).forEach((f) => void attachImage(f));
+              const files = Array.from(e.target.files ?? []);
+              // A real `change` event firing with zero files is unusual (a plain
+              // cancel doesn't fire `change` at all) — surface it instead of
+              // silently doing nothing, so a picker-side failure is diagnosable.
+              if (files.length === 0) setError("Le sélecteur n'a renvoyé aucun fichier.");
+              files.forEach((f) => void attachImage(f));
               e.target.value = "";
             }}
           />
@@ -645,7 +680,9 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             multiple
             className="hidden"
             onChange={(e) => {
-              Array.from(e.target.files ?? []).forEach((f) => void attachFile(f));
+              const files = Array.from(e.target.files ?? []);
+              if (files.length === 0) setError("Le sélecteur n'a renvoyé aucun fichier.");
+              files.forEach((f) => void attachFile(f));
               e.target.value = "";
             }}
           />
@@ -657,7 +694,9 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             multiple
             className="hidden"
             onChange={(e) => {
-              Array.from(e.target.files ?? []).forEach((f) => void attachFile(f));
+              const files = Array.from(e.target.files ?? []);
+              if (files.length === 0) setError("Le sélecteur n'a renvoyé aucun fichier.");
+              files.forEach((f) => void attachFile(f));
               e.target.value = "";
             }}
           />
