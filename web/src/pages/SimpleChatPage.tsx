@@ -259,12 +259,39 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     });
   }, []);
 
+  // A stuck session (e.g. a model's context-overflow/compression cooldown)
+  // has no other way to recover short of a fresh session_id — a brand new
+  // AIAgent instance, so any per-session error state resets with it.
+  const startNewChat = useCallback(() => {
+    setMessages([]);
+    setAttachments((prev) => {
+      prev.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+      return [];
+    });
+    setDraft("");
+    setError(null);
+    setSessionId(null);
+    gw.request<{ session_id: string }>("session.create", {})
+      .then((res) => setSessionId(res.session_id))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [gw]);
+
   if (isActive === false) return null;
 
   const connected = connState === "open" && !!sessionId;
 
   return (
     <div className="flex h-full flex-col">
+      <div className="flex items-center justify-end border-b border-border px-4 py-2">
+        <button
+          type="button"
+          className="rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-40"
+          disabled={sending}
+          onClick={startNewChat}
+        >
+          + Nouvelle conversation
+        </button>
+      </div>
       <div ref={transcriptRef} className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
           <div className="mx-auto mt-16 max-w-md text-center text-sm text-muted-foreground">
