@@ -101,6 +101,10 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                 val environ = os["environ"]
                 environ!!.callAttr("__setitem__", "HERMES_HOME", hermesHome)
                 environ.callAttr("__setitem__", "HOME", appContext.filesDir.absolutePath)
+                // Covers agent/i18n.py's static strings (approval prompts, gateway
+                // slash-command replies) — the dashboard's own UI locale is a
+                // separate, browser-side default (web/src/i18n/context.tsx).
+                environ.callAttr("__setitem__", "HERMES_LANGUAGE", "fr")
 
                 val sys = py.getModule("sys")
                 sys.put(
