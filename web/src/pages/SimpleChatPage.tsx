@@ -27,6 +27,7 @@ import {
   Copy,
   FileText,
   FolderUp,
+  History,
   ImagePlus,
   RotateCcw,
   Send,
@@ -53,6 +54,16 @@ interface ChatMessage {
   streaming: boolean;
   /** Source user text this assistant reply answers — regenerate resubmits it. */
   sourceUserText?: string;
+}
+
+/** One row of `session.list` — a past conversation the user can click back into. */
+interface SessionSummary {
+  id: string;
+  title: string;
+  preview: string;
+  started_at: number;
+  message_count: number;
+  source: string;
 }
 
 let nextId = 0;
@@ -92,6 +103,13 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Clickable "past conversations" panel — the in-page alternative to the
+  // separate Sessions page, which wasn't giving the user a working path
+  // back to old conversations on this build.
+  const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
+  const [sessionListOpen, setSessionListOpen] = useState(false);
+  const [sessionListLoading, setSessionListLoading] = useState(false);
+  const [sessionListError, setSessionListError] = useState<string | null>(null);
 
   const gw = useMemo(() => new GatewayClient(), []);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -102,6 +120,30 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
   // convention the old PTY-backed ChatPage used) — read once on mount.
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeIdRef = useRef(searchParams.get("resume"));
+
+  // Shared by the mount-time resume (via ?resume=) and the in-page session
+  // list's click-to-resume — both need to turn a session.resume/create
+  // response into transcript state the same way.
+  const applyResumeResult = useCallback(
+    (res: { session_id: string; messages?: { role: string; text?: string }[] }) => {
+      setSessionId(res.session_id);
+      setMessages(
+        (res.messages ?? [])
+          .filter(
+            (m): m is { role: "user" | "assistant"; text: string } =>
+              (m.role === "user" || m.role === "assistant") && !!m.text,
+          )
+          .map((m) => ({
+            id: newId(),
+            role: m.role,
+            text: m.text,
+            images: m.role === "assistant" ? extractImages(m.text) : [],
+            streaming: false,
+          })),
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -160,23 +202,7 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
       )
       .then((res) => {
         if (cancelled) return;
-        setSessionId(res.session_id);
-        if (res.messages) {
-          setMessages(
-            res.messages
-              .filter(
-                (m): m is { role: "user" | "assistant"; text: string } =>
-                  (m.role === "user" || m.role === "assistant") && !!m.text,
-              )
-              .map((m) => ({
-                id: newId(),
-                role: m.role,
-                text: m.text,
-                images: m.role === "assistant" ? extractImages(m.text) : [],
-                streaming: false,
-              })),
-          );
-        }
+        applyResumeResult(res);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -314,13 +340,64 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [gw, setSearchParams]);
 
+  const loadSessionList = useCallback(() => {
+    setSessionListLoading(true);
+    setSessionListError(null);
+    gw.request<{ sessions: SessionSummary[] }>("session.list", { limit: 50 })
+      .then((res) => setSessionList(res.sessions ?? []))
+      .catch((e) => setSessionListError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSessionListLoading(false));
+  }, [gw]);
+
+  const toggleSessionList = useCallback(() => {
+    setSessionListOpen((prev) => {
+      const next = !prev;
+      if (next) loadSessionList();
+      return next;
+    });
+  }, [loadSessionList]);
+
+  // Clicking a past conversation resumes it in place — same session.resume
+  // call the mount-time ?resume= path uses, just triggered from inside the
+  // chat page itself instead of requiring a trip through the Sessions page.
+  const resumeSession = useCallback(
+    (id: string) => {
+      setSessionListOpen(false);
+      if (id === sessionId) return;
+      setError(null);
+      setMessages([]);
+      setSessionId(null);
+      resumeIdRef.current = id;
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("resume", id);
+        return next;
+      });
+      gw.request<{
+        session_id: string;
+        messages?: { role: string; text?: string }[];
+      }>("session.resume", { session_id: id })
+        .then(applyResumeResult)
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    },
+    [gw, sessionId, setSearchParams, applyResumeResult],
+  );
+
   if (isActive === false) return null;
 
   const connected = connState === "open" && !!sessionId;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-end border-b border-border px-4 py-2">
+      <div className="relative flex items-center justify-between border-b border-border px-4 py-2">
+        <button
+          type="button"
+          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-muted"
+          onClick={toggleSessionList}
+        >
+          <History size={14} />
+          Historique
+        </button>
         <button
           type="button"
           className="rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-40"
@@ -329,6 +406,59 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
         >
           + Nouvelle conversation
         </button>
+
+        {sessionListOpen && (
+          <div className="absolute left-4 right-4 top-full z-20 mt-1 max-h-80 overflow-y-auto rounded-lg border border-border bg-background shadow-lg sm:left-auto sm:right-4 sm:w-96">
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                Conversations précédentes
+              </span>
+              <button
+                type="button"
+                onClick={() => setSessionListOpen(false)}
+                aria-label="Fermer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            {sessionListLoading && (
+              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                Chargement…
+              </div>
+            )}
+            {sessionListError && (
+              <div className="px-3 py-4 text-center text-xs text-destructive">
+                {sessionListError}
+              </div>
+            )}
+            {!sessionListLoading && !sessionListError && sessionList.length === 0 && (
+              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                Aucune conversation trouvée.
+              </div>
+            )}
+            {!sessionListLoading &&
+              sessionList.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={`flex w-full flex-col items-start gap-0.5 border-b border-border px-3 py-2 text-left last:border-b-0 hover:bg-muted ${
+                    s.id === sessionId ? "bg-muted" : ""
+                  }`}
+                  onClick={() => resumeSession(s.id)}
+                >
+                  <span className="w-full truncate text-sm font-medium">
+                    {s.title || (s.preview ? s.preview.slice(0, 60) : "Sans titre")}
+                  </span>
+                  <span className="flex w-full items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>{s.message_count} messages</span>
+                    {s.started_at ? (
+                      <span>· {new Date(s.started_at * 1000).toLocaleString("fr-FR")}</span>
+                    ) : null}
+                  </span>
+                </button>
+              ))}
+          </div>
+        )}
       </div>
       <div ref={transcriptRef} className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
