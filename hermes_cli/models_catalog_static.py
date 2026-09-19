@@ -290,6 +290,15 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "moonshotai/kimi-k2.5", "minimax/minimax-m2.7", "zai-org/glm-5", "deepseek/deepseek-v3-0324",
         "deepseek/deepseek-r1-0528", "qwen/qwen3-235b-a22b-fp8",
     ],
+    # Infermatic (api.totalgpt.ai) publishes its model *page* under friendly vendor/model names but
+    # the API's actual `model` field uses these hyphenated, quant-suffixed ids instead (confirmed
+    # against their own API docs examples, Sep 2026) — only listing ids seen there verbatim rather
+    # than guessing the rest of their catalog's naming. `hermes model` / the dashboard's "Refresh
+    # Models" still fetch the live, complete /v1/models list once a key is set; this is just the
+    # picker's offline fallback so it isn't empty before that succeeds.
+    "infermatic": [
+        "Sao10K-L3.3-70B-Euryale-v2.3-FP8-Dynamic", "Sao10K-72B-Qwen2.5-Kunou-v1-FP8-Dynamic",
+    ],
     # Bare ids derived from the picker snapshot so both stay in sync.
     "ai-gateway": [mid for mid, _ in VERCEL_AI_GATEWAY_MODELS],
 }
