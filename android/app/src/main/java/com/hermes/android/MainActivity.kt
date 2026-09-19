@@ -276,8 +276,10 @@ class MainActivity : ComponentActivity() {
 
     // ---- Folder import (Storage Access Framework) ----------------------------------
 
-    /** Exposed to the dashboard's JS as `window.HermesAndroid.pickFolder()`. */
-    private inner class HermesFolderBridge {
+    /** Exposed to the dashboard's JS as `window.HermesAndroid.pickFolder()`. NOT private:
+     *  WebView's addJavascriptInterface binds to this reflectively, and a private/
+     *  package-private class can silently break that binding on some WebView versions. */
+    inner class HermesFolderBridge {
         @JavascriptInterface
         fun pickFolder() {
             // @JavascriptInterface methods run on a WebView-owned worker thread, not
@@ -287,6 +289,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleFolderPicked(treeUri: Uri) {
+        // Confirms — from a screenshot, with no adb on this device — that the bridge path
+        // actually fired and a folder came back, before the (background-thread) walk below.
+        Toast.makeText(this, "Dossier choisi, lecture en cours…", Toast.LENGTH_SHORT).show()
         try {
             contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
@@ -306,8 +311,19 @@ class MainActivity : ComponentActivity() {
             pushToJs(wv, "onError", JSONObject().put("message", "Impossible d'ouvrir le dossier choisi."))
             return
         }
+        // Direct-children count BEFORE recursing — tells us whether the DocumentsProvider
+        // handed back an empty listing at the root (the picked folder, or the grant, is the
+        // problem) vs. the walk itself losing files somewhere deeper.
+        val directChildren = root.listFiles().size
         val files = mutableListOf<Pair<String, DocumentFile>>()
         collectFiles(root, root.name ?: "dossier", files)
+        mainHandler.post {
+            Toast.makeText(
+                this,
+                "'${root.name}' : $directChildren élément(s) direct(s), ${files.size} fichier(s) au total",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
         if (files.size > folderImportMaxFiles) {
             pushToJs(
                 wv, "onError",

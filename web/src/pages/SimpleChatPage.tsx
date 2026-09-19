@@ -394,6 +394,7 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
       onError: (message) => setError(message),
       onDone: (count) => {
         if (count > 0) showNotice(`${count} fichier(s) importé(s) du dossier ✓`);
+        else setError("Aucun fichier trouvé dans ce dossier.");
       },
     };
     return () => {
