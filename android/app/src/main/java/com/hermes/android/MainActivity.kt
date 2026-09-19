@@ -1,21 +1,32 @@
 package com.hermes.android
 
-import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
+import android.util.Base64
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebChromeClient.FileChooserParams
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
+import org.json.JSONObject
+import java.io.IOException
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.net.HttpURLConnection
@@ -28,15 +39,36 @@ import java.net.URL
  * ever reaches [showFatalError] — the WebView path is exercised starting
  * Phase 3, once a real runtime is wired in.
  */
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
 
     private lateinit var container: LinearLayout
     private lateinit var statusView: TextView
+    private var webView: WebView? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val runtime: HermesRuntime by lazy { HermesRuntime.create(this) }
 
     private val dashboardPollIntervalMs = 500L
     private val dashboardPollTimeoutMs = 60_000L
+
+    // Android's WebView shows no file chooser at all for an <input type="file"> click
+    // unless the host app implements onShowFileChooser() below — without it, the
+    // dashboard's image/file attachment buttons look decorative (click does nothing).
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = filePathCallback
+            filePathCallback = null
+            callback?.onReceiveValue(FileChooserParams.parseResult(result.resultCode, result.data))
+        }
+
+    // The dashboard's "import folder" button has no WebView equivalent of desktop
+    // Chrome's real directory upload (no webkitRelativePath comes back through
+    // onShowFileChooser), so it calls window.HermesAndroid.pickFolder() directly
+    // instead of clicking a hidden <input webkitdirectory> — see HermesFolderBridge.
+    private val folderPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+            if (treeUri != null) handleFolderPicked(treeUri)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,6 +135,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        webView?.destroy()
+        webView = null
         runtime.stop()
         super.onDestroy()
     }
@@ -200,7 +234,26 @@ class MainActivity : Activity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             webViewClient = WebViewClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView,
+                    callback: ValueCallback<Array<Uri>>,
+                    params: FileChooserParams,
+                ): Boolean {
+                    filePathCallback?.onReceiveValue(null)
+                    filePathCallback = callback
+                    return try {
+                        fileChooserLauncher.launch(params.createIntent())
+                        true
+                    } catch (e: Exception) {
+                        filePathCallback = null
+                        false
+                    }
+                }
+            }
+            addJavascriptInterface(HermesFolderBridge(), "HermesAndroid")
         }
+        this.webView = webView
         container.removeAllViews()
         container.addView(
             webView,
@@ -210,5 +263,97 @@ class MainActivity : Activity() {
             ),
         )
         webView.loadUrl("http://127.0.0.1:$port/")
+    }
+
+    // ---- Folder import (Storage Access Framework) ----------------------------------
+
+    /** Exposed to the dashboard's JS as `window.HermesAndroid.pickFolder()`. */
+    private inner class HermesFolderBridge {
+        @JavascriptInterface
+        fun pickFolder() {
+            // @JavascriptInterface methods run on a WebView-owned worker thread, not
+            // the UI thread — ActivityResultLauncher.launch() requires the UI thread.
+            mainHandler.post { folderPickerLauncher.launch(null) }
+        }
+    }
+
+    private fun handleFolderPicked(treeUri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Some providers don't support persistable grants; the one-shot grant from
+            // ACTION_OPEN_DOCUMENT_TREE is still enough to complete this single walk.
+        }
+        Thread({ importFolderTree(treeUri) }, "hermes-folder-import").start()
+    }
+
+    // Pragmatic guard against pathological trees, not a hard product requirement.
+    private val folderImportMaxFiles = 500
+
+    private fun importFolderTree(treeUri: Uri) {
+        val wv = webView ?: return
+        val root = DocumentFile.fromTreeUri(this, treeUri)
+        if (root == null || !root.isDirectory) {
+            pushToJs(wv, "onError", JSONObject().put("message", "Impossible d'ouvrir le dossier choisi."))
+            return
+        }
+        val files = mutableListOf<Pair<String, DocumentFile>>()
+        collectFiles(root, root.name ?: "dossier", files)
+        if (files.size > folderImportMaxFiles) {
+            pushToJs(
+                wv, "onError",
+                JSONObject().put(
+                    "message",
+                    "Le dossier contient plus de $folderImportMaxFiles fichiers ; import annulé.",
+                ),
+            )
+            return
+        }
+        for ((relativePath, doc) in files) {
+            try {
+                val bytes = contentResolver.openInputStream(doc.uri)?.use { it.readBytes() }
+                    ?: throw IOException("openInputStream a renvoyé null")
+                val dataUrl = "data:${doc.type ?: "application/octet-stream"};base64," +
+                    Base64.encodeToString(bytes, Base64.NO_WRAP)
+                pushToJs(
+                    wv, "onFile",
+                    JSONObject().apply {
+                        put("name", doc.name ?: relativePath.substringAfterLast('/'))
+                        put("relativePath", relativePath)
+                        put("dataUrl", dataUrl)
+                    },
+                )
+            } catch (e: Exception) {
+                pushToJs(wv, "onError", JSONObject().put("message", "$relativePath : ${e.message}"))
+            }
+        }
+        mainHandler.post {
+            wv.evaluateJavascript(
+                "window.__HERMES_FOLDER_IMPORT__ && window.__HERMES_FOLDER_IMPORT__.onDone(${files.size});",
+                null,
+            )
+        }
+    }
+
+    private fun collectFiles(dir: DocumentFile, relPrefix: String, out: MutableList<Pair<String, DocumentFile>>) {
+        if (out.size > folderImportMaxFiles) return
+        for (child in dir.listFiles()) {
+            val name = child.name ?: continue
+            val childPath = "$relPrefix/$name"
+            if (child.isDirectory) collectFiles(child, childPath, out)
+            else if (child.isFile) out += childPath to child
+        }
+    }
+
+    // One evaluateJavascript call per file (never one call with everything inlined) —
+    // bounds each JS string to a single file's payload; JSONObject.toString() is
+    // already valid, correctly-escaped JS, so no manual string-escaping is needed.
+    private fun pushToJs(wv: WebView, fn: String, payload: JSONObject) {
+        mainHandler.post {
+            wv.evaluateJavascript(
+                "window.__HERMES_FOLDER_IMPORT__ && window.__HERMES_FOLDER_IMPORT__.$fn($payload);",
+                null,
+            )
+        }
     }
 }

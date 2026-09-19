@@ -43,6 +43,33 @@ interface PendingAttachment {
   name: string;
   /** Preview only for images (object URL); never sent to the server. */
   previewUrl?: string;
+  /** Folder-relative path (mirrors File.webkitRelativePath); set only for folder imports. */
+  relativePath?: string;
+  /** The server's real @file: ref (file.attach's ref_text/ref_path) — used verbatim in
+   *  handleSend instead of re-deriving `@file:${name}`, so two files sharing a basename
+   *  from different subfolders each resolve to what was actually stored server-side. */
+  refText?: string;
+}
+
+/** A single file pushed from the Android folder-import bridge (see MainActivity.kt's
+ *  HermesFolderBridge) — one call per file, never the whole tree in one payload. */
+interface HermesFolderImportFile {
+  name: string;
+  relativePath: string;
+  dataUrl: string;
+}
+
+declare global {
+  interface Window {
+    /** Present only in the Android WebView build; absent everywhere else (desktop
+     *  browser, Electron) — the folder button falls back to <input webkitdirectory>. */
+    HermesAndroid?: { pickFolder: () => void };
+    __HERMES_FOLDER_IMPORT__?: {
+      onFile: (payload: HermesFolderImportFile) => void;
+      onError: (message: string) => void;
+      onDone: (count: number) => void;
+    };
+  }
 }
 
 interface ChatMessage {
@@ -251,7 +278,10 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     // refs need appending here.
     const fileRefs = attachments
       .filter((a) => a.kind === "file")
-      .map((a) => `\n@file:${a.name}`)
+      .map((a) => {
+        const ref = a.refText ?? `@file:${a.name}`;
+        return a.relativePath ? `\n${ref} (dossier importé : ${a.relativePath})` : `\n${ref}`;
+      })
       .join("");
     const text = draft.trim() || "(pièce jointe)";
     void submit(text + fileRefs);
@@ -289,18 +319,25 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     [gw, sessionId],
   );
 
-  const attachFile = useCallback(
-    async (file: File) => {
+  // Shared by the browser-File attach path (file/folder <input> onChange) and the
+  // Android folder-import bridge (which hands over raw bytes, not a File object).
+  const attachFileData = useCallback(
+    async (name: string, dataUrl: string, relativePath?: string) => {
       if (!sessionId) return;
       try {
-        const dataUrl = await readFileAsDataUrl(file);
-        const res = await gw.request<{ ref_text?: string; name?: string }>(
+        const res = await gw.request<{ ref_text?: string; ref_path?: string; name?: string }>(
           "file.attach",
-          { session_id: sessionId, data_url: dataUrl, name: file.name },
+          { session_id: sessionId, data_url: dataUrl, name },
         );
         setAttachments((prev) => [
           ...prev,
-          { id: newId(), kind: "file", name: res.ref_text ? file.name : file.name },
+          {
+            id: newId(),
+            kind: "file",
+            name: res.name ?? name,
+            relativePath,
+            refText: res.ref_text ?? `@file:${res.ref_path ?? name}`,
+          },
         ]);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -308,6 +345,36 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     },
     [gw, sessionId],
   );
+
+  const attachFile = useCallback(
+    (file: File) => {
+      const relativePath =
+        (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined;
+      void readFileAsDataUrl(file).then(
+        (dataUrl) => attachFileData(file.name, dataUrl, relativePath),
+        (e) => setError(e instanceof Error ? e.message : String(e)),
+      );
+    },
+    [attachFileData],
+  );
+
+  // Receiver for the Android folder-import bridge (window.HermesAndroid.pickFolder());
+  // a ref keeps this from closing over a stale sessionId/gw across reconnects.
+  const attachFileDataRef = useRef(attachFileData);
+  useEffect(() => {
+    attachFileDataRef.current = attachFileData;
+  }, [attachFileData]);
+
+  useEffect(() => {
+    window.__HERMES_FOLDER_IMPORT__ = {
+      onFile: (f) => void attachFileDataRef.current(f.name, f.dataUrl, f.relativePath),
+      onError: (message) => setError(message),
+      onDone: () => {},
+    };
+    return () => {
+      delete window.__HERMES_FOLDER_IMPORT__;
+    };
+  }, []);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => {
@@ -546,7 +613,9 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
                 ) : (
                   <FileText size={12} />
                 )}
-                <span className="max-w-[10rem] truncate">{a.name}</span>
+                <span className="max-w-[10rem] truncate" title={a.relativePath || a.name}>
+                  {a.relativePath || a.name}
+                </span>
                 <button
                   type="button"
                   onClick={() => removeAttachment(a.id)}
@@ -615,7 +684,15 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
             title="Importer un dossier"
             className="rounded-lg border border-border p-2 hover:bg-muted disabled:opacity-40"
             disabled={!connected}
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => {
+              // Android has no real recursive directory-upload input (no
+              // webkitRelativePath comes back through onShowFileChooser), so the
+              // native app bridges this button directly to a Storage Access
+              // Framework folder picker; everywhere else, the hidden
+              // <input webkitdirectory> below still works as-is.
+              if (window.HermesAndroid?.pickFolder) window.HermesAndroid.pickFolder();
+              else folderInputRef.current?.click();
+            }}
           >
             <FolderUp size={18} />
           </button>

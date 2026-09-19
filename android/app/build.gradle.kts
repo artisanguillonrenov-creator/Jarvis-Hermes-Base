@@ -77,4 +77,12 @@ chaquopy {
 }
 
 dependencies {
+    // ComponentActivity + registerForActivityResult, needed for the WebView's file
+    // chooser (onShowFileChooser) and the folder-import Storage Access Framework picker.
+    // Pinned below the 1.10+ series, which requires compileSdk 36 / AGP 8.9.1+ (this
+    // project is on compileSdk 35 / AGP 8.6.1) — 1.9.3 is the latest release that still
+    // targets compileSdk 35.
+    implementation("androidx.activity:activity-ktx:1.9.3")
+    // DocumentFile: recursive tree walk over a picked folder (ACTION_OPEN_DOCUMENT_TREE).
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }
