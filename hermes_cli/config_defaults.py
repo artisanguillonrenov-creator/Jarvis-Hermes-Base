@@ -2428,7 +2428,7 @@ OPTIONAL_ENV_VARS = {
     "FIREWORKS_API_KEY": _prov("Fireworks AI API key", "Fireworks AI API key",
         "https://app.fireworks.ai/settings/users/api-keys"),
     "INFERMATIC_API_KEY": _prov("Infermatic API key", "Infermatic API key",
-        "https://infermatic.ai/"),
+        "https://infermatic.ai/", advanced=False),
     "INFERMATIC_BASE_URL": _base_url("Infermatic"),
     "MINIMAX_API_KEY": _prov("MiniMax API key (international)", "MiniMax API key",
         "https://www.minimax.io/"),
