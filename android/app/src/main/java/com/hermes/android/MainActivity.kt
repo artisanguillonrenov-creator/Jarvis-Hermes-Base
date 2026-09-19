@@ -2,15 +2,20 @@ package com.hermes.android
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -49,8 +54,17 @@ class MainActivity : Activity() {
             setTextColor(Color.BLACK)
             text = getString(R.string.app_name)
         }
+        val statusScroll = ScrollView(this).apply {
+            addView(
+                statusView,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
         container.addView(
-            statusView,
+            statusScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -81,11 +95,37 @@ class MainActivity : Activity() {
         }, "hermes-runtime-start").start()
     }
 
+    // faulthandler.dump_traceback_later() fires at 25s (HermesRuntime.start) —
+    // give it a couple seconds' margin before treating a stuck start as a
+    // silent hang and reading the dump instead of waiting out the full timeout.
+    private val diagReadDelayMs = 28_000L
+
     private fun waitForDashboardThenShow(port: Int) {
         val deadline = System.currentTimeMillis() + dashboardPollTimeoutMs
+        var diagShown = false
         while (System.currentTimeMillis() < deadline) {
             if (isDashboardResponding(port)) {
                 mainHandler.post { showDashboard(port) }
+                return
+            }
+            // No adb/PC for this device — the server thread's own crash is the
+            // only useful diagnostic, so surface it immediately instead of
+            // waiting out the full timeout and showing a generic message.
+            runtime.lastError?.let { error ->
+                mainHandler.post { showFatalError(error) }
+                return
+            }
+            if (!diagShown && System.currentTimeMillis() - (deadline - dashboardPollTimeoutMs) >= diagReadDelayMs &&
+                runtime.diagFile.exists()
+            ) {
+                diagShown = true
+                val dump = runtime.diagFile.readText()
+                mainHandler.post {
+                    showFatalError(
+                        IllegalStateException(
+                            "Le démarrage semble bloqué (aucune exception, aucune réponse) — " +
+                                "traces de tous les threads Python :\n\n$dump"))
+                }
                 return
             }
             Thread.sleep(dashboardPollIntervalMs)
@@ -94,7 +134,8 @@ class MainActivity : Activity() {
             showFatalError(
                 IllegalStateException(
                     "Le tableau de bord Hermès n'a pas répondu sur 127.0.0.1:$port " +
-                        "après ${dashboardPollTimeoutMs / 1000} secondes."))
+                        "après ${dashboardPollTimeoutMs / 1000} secondes, sans exception " +
+                        "remontée par le thread serveur."))
         }
     }
 
@@ -111,7 +152,14 @@ class MainActivity : Activity() {
     }
 
     private fun showFatalError(t: Throwable) {
-        statusView.text = "Échec du démarrage du runtime Hermès :\n${t.javaClass.simpleName}: ${t.message}"
+        Log.e("MainActivity", "Échec du démarrage du runtime Hermès", t)
+        val trace = StringWriter().also { t.printStackTrace(PrintWriter(it)) }.toString()
+        statusView.apply {
+            gravity = Gravity.START
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            text = "Échec du démarrage du runtime Hermès :\n\n$trace"
+        }
     }
 
     private fun showDashboard(port: Int) {

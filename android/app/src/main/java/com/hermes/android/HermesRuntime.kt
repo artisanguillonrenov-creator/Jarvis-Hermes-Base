@@ -2,9 +2,11 @@ package com.hermes.android
 
 import android.content.Context
 import android.util.Log
+import com.chaquo.python.Kwarg
 import com.chaquo.python.PyException
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.io.File
 
 /**
  * Boundary between the Android app and the embedded Hermès (Python) runtime.
@@ -22,12 +24,29 @@ interface HermesRuntime {
     val port: Int
 
     /**
+     * Non-null once the dedicated server thread has died from an uncaught
+     * exception. There's no adb/PC in the loop for this app's target device,
+     * so the only diagnostic channel is putting the real failure on screen —
+     * callers should poll this instead of waiting out a generic timeout.
+     */
+    val lastError: Throwable?
+
+    /**
+     * Path to a diagnostic dump that fills in exactly when a hang wouldn't
+     * otherwise raise anything into [lastError] — e.g. a call blocked forever
+     * on I/O. Populated ~25s into the Python-side start attempt regardless of
+     * outcome (see [start]); callers should only read it once they've decided
+     * startup is stuck (no HTTP response, no [lastError]).
+     */
+    val diagFile: File
+
+    /**
      * Starts the Hermès dashboard server on a dedicated background thread and
      * returns immediately (it does not itself wait for the server to be
-     * listening — the caller polls [port]). Throws only if the interpreter or
-     * the initial dispatch into `hermes_cli.main.main()` cannot be started at
-     * all; runtime failures inside the server surface as that thread dying,
-     * which shows up as [port] never answering.
+     * listening — the caller polls [port] and [lastError]). Throws only if the
+     * interpreter or the initial dispatch into `hermes_cli.main.main()` cannot
+     * be started at all; runtime failures inside the server surface via
+     * [lastError].
      */
     fun start(onStatus: (String) -> Unit)
 
@@ -40,6 +59,11 @@ interface HermesRuntime {
 
 private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntime {
     override val port: Int = 9119
+    override val diagFile: File = context.filesDir.resolve("hermes_diag.log")
+
+    @Volatile
+    override var lastError: Throwable? = null
+        private set
 
     @Volatile
     private var serverThread: Thread? = null
@@ -79,12 +103,23 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                     ),
                 )
 
+                // Belt-and-suspenders for a hang with no exception (e.g. a
+                // blocking call on stdin/network that never returns): dump
+                // every thread's Python stack to a plain file after 25s,
+                // readable from Kotlin with no adb/PC involved.
+                diagFile.delete()
+                val diagHandle = py.getBuiltins().callAttr("open", diagFile.absolutePath, "w")
+                py.getModule("faulthandler")
+                    .callAttr("dump_traceback_later", 25, Kwarg("file", diagHandle))
+
                 onStatus("Lancement du tableau de bord Hermès…")
                 py.getModule("hermes_cli.main").callAttr("main")
             } catch (e: PyException) {
                 Log.e(TAG, "hermes_cli.main.main() a levé une exception Python", e)
+                lastError = e
             } catch (t: Throwable) {
                 Log.e(TAG, "Le thread du serveur Hermès s'est arrêté de façon inattendue", t)
+                lastError = t
             }
         }, "hermes-dashboard-server")
         thread.isDaemon = true
