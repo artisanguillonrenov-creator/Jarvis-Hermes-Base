@@ -48,18 +48,30 @@ android {
 // hermes-agent's own pyproject.toml caps at <3.14 because some Rust-backed
 // transitives (pydantic-core) have no cp314 wheel yet -- 3.12 is a safe,
 // well-supported middle ground.
+//
+// hermes-agent's own setup.py deliberately REFUSES to build a wheel/sdist
+// outside a Nix build ("the wheel would ship without bundled assets --
+// locales, skills, optional-mcps, web_dist, tui_dist, plugin manifests --
+// since those are resolved at runtime via ... the source-checkout
+// layout"). So this does NOT `pip install` hermes-agent itself -- it adds
+// the source checkout as a Chaquopy Python source directory instead
+// (matching the "source-checkout layout" the project's own runtime
+// asset resolution expects), and uses pip only for hermes-agent's real
+// third-party dependencies (openai, httpx, cryptography, ...), which have
+// no such constraint.
+val hermesSrcDir = providers.environmentVariable("HERMES_ANDROID_SRC_DIR")
+    .getOrElse(rootProject.projectDir.parentFile.resolve("../hermes-src-staged").absolutePath)
+
 chaquopy {
     defaultConfig {
         version = "3.12"
         pip {
-            // Install hermes-agent itself from this checkout (the Android
-            // project lives at <repo>/android/app, so the repo root --
-            // which has pyproject.toml -- is two levels up). No extras
-            // yet: this is the minimal set to get Chaquopy's pip/wheel
-            // pipeline proven out end to end first. Extras (termux, cron,
-            // mcp, ...) get added once this baseline installs and the
-            // dashboard launches.
-            install(rootProject.projectDir.parentFile.absolutePath)
+            install("-r", "requirements.txt")
+        }
+    }
+    sourceSets {
+        getByName("main") {
+            srcDir(hermesSrcDir)
         }
     }
 }
