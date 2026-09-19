@@ -1,0 +1,323 @@
+name: Android Termux Bootstrap
+
+# Builds a custom Termux-style bootstrap (Python 3.13, aarch64 only) for
+# TERMUX_APP_PACKAGE=com.hermes.android, per the Android directives doc.
+# Termux's own prebuilt bootstraps/debs are compiled with the app package
+# name baked into absolute paths (/data/data/com.termux/files/usr), so they
+# cannot be reused under a different package name — every package has to be
+# rebuilt from source with that path changed, which is what this workflow
+# does using termux-packages' own build system in Docker.
+#
+# Pinned to commit 799060131390c7c8f9b1d93a455061e8736d847a: the last
+# commit in termux/termux-packages where packages/python/build.sh still
+# builds Python 3.13.13, one commit before "bump(main/python): 3.14"
+# (b4bbc294d9e6b934bcc901c4846a641589e9f586). Hermès requires
+# >=3.11,<3.14 (see pyproject.toml) and Termux's current default is 3.14 —
+# exactly the trap the directives call out.
+#
+# This is a genuinely heavy build: rust's TERMUX_PKG_DEPENDS pulls in
+# clang/libllvm/lld, so building rust for a new app package name can mean
+# compiling LLVM from source too. termux-generator's own docs cite ~3
+# hours as a best case for a much shorter package list. GitHub's hard
+# ceiling for a hosted-runner job is 6 hours regardless of timeout-minutes
+# — this may not fit in one run. To survive that, the built .deb output
+# and downloaded upstream sources are cached and carried into the next
+# run (build-package.sh skips a package it already built), so re-running
+# this workflow after a timeout resumes rather than starting over.
+
+on:
+  workflow_dispatch: {}
+  # GitHub only exposes workflow_dispatch via the API/UI for workflows that
+  # exist on the repo's default branch; this file lives only on our feature
+  # branch. Trigger on pushes that touch this file itself so it's both
+  # registered and (re-)runnable from here — the same pattern used by
+  # build-debug-apk.yml.
+  push:
+    paths:
+      - '.github/workflows/build-bootstrap.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-bootstrap
+  cancel-in-progress: false
+
+env:
+  TERMUX_PACKAGES_COMMIT: '799060131390c7c8f9b1d93a455061e8736d847a'
+  TERMUX_APP_PACKAGE: 'com.hermes.android'
+  TERMUX_BOOTSTRAP_PACKAGES: 'python,openssl,libffi,rust,libsqlite,git'
+
+jobs:
+  build:
+    name: build-bootstraps.sh (aarch64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # GitHub's own per-job ceiling for hosted runners — see note above.
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/az /usr/local/share/boost /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
+
+      - name: Disable AppArmor
+        # Reproduced three times: run-docker.sh's own container bootstrap
+        # loads a restricted AppArmor profile on the HOST via
+        # apparmor_parser, which panics ("could not restore to saved user
+        # id: Operation not permitted") — a broken apparmor_parser on this
+        # runner image, not anything in our build. `systemctl stop apparmor`
+        # alone did NOT stop this (the AppArmor LSM is compiled into the
+        # kernel and stays "enabled" regardless of the systemd unit's
+        # state, so run-docker.sh's `aa-status --enabled` gate kept passing
+        # and still invoked the broken tool). run-docker.sh's OTHER gate is
+        # `command -v apparmor_parser`, so remove the binary outright —
+        # that gate then fails and it skips loading profiles entirely
+        # (prints its own warning and continues unconfined instead).
+        run: |
+          P=$(command -v apparmor_parser || true)
+          if [ -n "$P" ]; then
+            sudo rm -f "$P"
+            echo "Removed $P"
+          else
+            echo "apparmor_parser not found; nothing to do"
+          fi
+
+      - name: Clone termux-packages (pinned)
+        run: |
+          git clone https://github.com/termux/termux-packages.git termux-packages-src
+          cd termux-packages-src
+          git checkout "$TERMUX_PACKAGES_COMMIT"
+
+      - name: Restore built-package cache (resume across runs)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: termux-packages-src/output
+          key: termux-bootstrap-output-${{ env.TERMUX_APP_PACKAGE }}-${{ env.TERMUX_PACKAGES_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            termux-bootstrap-output-${{ env.TERMUX_APP_PACKAGE }}-${{ env.TERMUX_PACKAGES_COMMIT }}-
+
+      - name: Restore upstream source download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.termux-build
+          key: termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            termux-bootstrap-srccache-${{ env.TERMUX_PACKAGES_COMMIT }}-
+
+      - name: Patch run-docker.sh's AppArmor security-opt to unconfined
+        # Removing apparmor_parser (see the "Disable AppArmor" step) stops
+        # run-docker.sh from panicking while COMPILING the profile, but
+        # docker run itself still unconditionally passes
+        # `--security-opt apparmor=_custom-termux-package-builder-<name>`
+        # on Linux, and that named profile was never loaded — "apparmor
+        # failed to apply profile: ... no such file or directory".
+        # Dropping the flag entirely (tried first) is NOT equivalent to no
+        # confinement: without an explicit apparmor security-opt, Docker
+        # applies its OWN built-in "docker-default" profile, which blocks
+        # the fuse mount apt's build needs ("fuse-overlayfs: cannot mount:
+        # Permission denied") — termux's custom profile existed precisely
+        # to allow that. The correct equivalent is an explicit
+        # `apparmor=unconfined`.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/--security-opt apparmor=_custom-termux-package-builder-$CONTAINER_NAME/--security-opt apparmor=unconfined/' scripts/run-docker.sh
+          grep -n 'SEC_OPT=" --security-opt seccomp' scripts/run-docker.sh
+
+      - name: Patch the app package name
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"\$/TERMUX_APP__PACKAGE_NAME=\"$TERMUX_APP_PACKAGE\"/" scripts/properties.sh
+          sed -i "s/^TERMUX_APP__NAMESPACE=\"com.termux\"\$/TERMUX_APP__NAMESPACE=\"$TERMUX_APP_PACKAGE\"/" scripts/properties.sh
+          grep -qx "TERMUX_APP__PACKAGE_NAME=\"$TERMUX_APP_PACKAGE\"" scripts/properties.sh
+          grep -qx "TERMUX_APP__NAMESPACE=\"$TERMUX_APP_PACKAGE\"" scripts/properties.sh
+          echo "Patched app package name to $TERMUX_APP_PACKAGE:"
+          grep -n "TERMUX_APP__PACKAGE_NAME=\|TERMUX_APP__NAMESPACE=" scripts/properties.sh
+
+      - name: Patch a stale upstream checksum (foot, pulled in by ncurses)
+        # Reproduced 2026-09-18: ncurses' build.sh sources x11-packages/foot's
+        # TERMUX_PKG_SHA256 to fetch foot's terminfo source (foot is a
+        # build-time-only input for ncurses' terminfo database, unrelated to
+        # anything Hermès uses directly). Codeberg has regenerated the
+        # archive/1.27.0.tar.gz asset for that tag since this commit was
+        # pinned, so the recorded checksum no longer matches what Codeberg
+        # actually serves. Verified by re-downloading and hashing it directly
+        # (not a transient CI network fluke). Pin bumping the whole repo would
+        # reopen the Python 3.14 trap this workflow exists to avoid, so patch
+        # just this one checksum instead.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/^TERMUX_PKG_SHA256=4e6131cc859ec6a36569f1978cf3617cc3836a681d13d228ded1b4885dab7770$/TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3/' x11-packages/foot/build.sh
+          grep -qx 'TERMUX_PKG_SHA256=f5917cad2d7b723b99873e53d78fd10ea202923d189aed5086591fc53b70b7e3' x11-packages/foot/build.sh
+
+      - name: Patch build-bootstraps.sh's stale 'bzip2' package name
+        # Reproduced 2026-09-18 (run #8, ~1h10 into the real build — bash
+        # compiled fine, then the very next default bootstrap package
+        # failed): scripts/build-bootstraps.sh's default PACKAGES list still
+        # requests "bzip2" as a standalone package, but at this pinned
+        # commit bzip2 has been refactored into a SUBPACKAGE of libbz2
+        # (packages/libbz2/bzip2.subpackage.sh) — there is no more
+        # packages/bzip2/build.sh. build-package.sh only resolves package
+        # DIRECTORIES for its top-level build target, not subpackage names,
+        # so it fails with "No package bzip2 found in any of the enabled
+        # repositories". Building "libbz2" instead produces both the
+        # libbz2 AND bzip2 .deb files in one pass (that's what a
+        # subpackage is), and build-bootstraps.sh's extract_debs() scans
+        # and extracts every .deb it finds in the output dir regardless of
+        # what name was originally requested — so the bzip2 binary still
+        # ends up in the final bootstrap unchanged.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/PACKAGES+=("bzip2")/PACKAGES+=("libbz2")/' scripts/build-bootstraps.sh
+          grep -qx '		PACKAGES+=("libbz2")' scripts/build-bootstraps.sh
+
+      - name: Replace coreutils with busybox in the default bootstrap package list
+        # Decided 2026-09-18 after coreutils' gnulib configure hung five
+        # separate times (runs #9-#14 and #16), each on a different
+        # permission/filesystem syscall probe, despite three targeted
+        # fixes (libbz2 rename, statfs cache pre-answers, NSS hardening) --
+        # diminishing returns on patching one gnulib check at a time.
+        # busybox builds via a single Kconfig + make, no autoconf/gnulib at
+        # all, so this whole class of hang doesn't apply to it. It provides
+        # the same practical utilities (ls, cat, cp, grep, sed, tar, diff,
+        # ...) as a single multi-call binary. Its own build.sh only
+        # installs the `busybox` binary itself plus an `ash` symlink --
+        # unlike coreutils' build, it does NOT create bin/ls, bin/cat, etc.
+        # It can't create those symlinks for every applet at CI build time
+        # either: `busybox --install -s` needs to actually RUN the
+        # binary to read its own compiled-in applet list, and this is an
+        # aarch64 binary built on an x86_64 CI host. That step instead
+        # belongs in HermesRuntime's on-device first-run setup, run
+        # natively on the tablet's real CPU: `busybox --install -s
+        # $PREFIX/bin` right after extracting the bootstrap.
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          sed -i 's/PACKAGES+=("coreutils")/PACKAGES+=("busybox")/' scripts/build-bootstraps.sh
+          grep -qx '		PACKAGES+=("busybox")' scripts/build-bootstraps.sh
+
+      - name: Fix Android SDK directory permissions inside the builder container
+        # Reproduced identically on two separate runs: termux-am (a hard
+        # dependency of bash, one of build-bootstraps.sh's own default
+        # packages) runs a Gradle build that auto-installs two Android SDK
+        # components. Both times it failed at the same spot with "Warning:
+        # Failed to read or create install properties file" then "Failed to
+        # install the following SDK components" — a well-documented
+        # sdkmanager permissions issue on the bundled SDK directory, not a
+        # transient network fault (confirmed by the failure recurring
+        # verbatim on a retry). chmod it before the real build starts.
+        working-directory: termux-packages-src
+        run: |
+          ./scripts/run-docker.sh sudo bash -c '
+            for d in /home/builder/lib/android-sdk-*; do
+              [ -d "$d" ] && chmod -R a+rwx "$d" && echo "chmod: $d"
+            done
+          '
+
+      - name: Harden the builder container's NSS config against permission-check hangs
+        # Every hang reproduced so far (runs #9-#14, 2026-09-18) lands right
+        # after openssl finishes, going into coreutils' gnulib configure --
+        # and every specific line it's frozen on so far (fu_cv_sys_stat_*,
+        # ac_cv_func_getgroups_works, eaccess) is a permission/identity
+        # syscall that gnulib probes by actually compiling and running a
+        # tiny test program, not by a header-only check. getgroups/eaccess
+        # style calls can go through NSS (Name Service Switch); if
+        # /etc/nsswitch.conf in this builder image references anything
+        # beyond local files (ldap, winbind, systemd-based lookups) for
+        # passwd/group, a lookup can block on an unreachable service
+        # instead of erroring immediately -- an unverified but well-known
+        # class of cause for exactly this "compiles, runs, then just never
+        # returns" symptom. This is a safe, no-op-if-unneeded hardening for
+        # a throwaway CI container regardless: force passwd/group/shadow to
+        # resolve from local files only, which is always instant and is
+        # all a minimal build container needs anyway. Written to the
+        # container's real filesystem, so (unlike a shell ulimit set in
+        # this same docker-exec session) it persists into the later,
+        # separate docker-exec session that runs the actual build.
+        working-directory: termux-packages-src
+        run: |
+          ./scripts/run-docker.sh sudo bash -c '
+            printf "%s\n" \
+              "passwd: files" \
+              "group: files" \
+              "shadow: files" \
+              "hosts: files dns" \
+              > /etc/nsswitch.conf
+            cat /etc/nsswitch.conf
+          '
+
+      - name: Build the default bootstrap utilities in Docker
+        # Reproduced three times (runs #9, #10, #11, 2026-09-18): the build
+        # silently hangs -- zero new output, process never returns -- a few
+        # checks into GNU coreutils' gnulib-generated configure script (the
+        # exact line varies slightly between runs: sys/mount.h, __freadahead,
+        # struct stat.st_blocks), right where cross-compiling gnulib checks
+        # stop being answered from a pre-seeded cache/guess. An inactivity
+        # watchdog script (kill the build if its log file stops growing) was
+        # tried first but never fired even 20+ minutes past the last output
+        # line -- GitHub Actions runs step scripts with `bash -e` by default,
+        # and something in that watchdog loop likely isn't as -e/job-control
+        # safe as intended. Simpler and far more battle-tested: split into
+        # two steps and bound each with the plain `timeout` command instead
+        # of hand-rolled process/output monitoring.
+        #
+        # This step builds ONLY the default bootstrap package list (no
+        # --add), which is bash plus ~30 small, normally-fast utilities
+        # including the coreutils that hangs. None of these should
+        # legitimately take anywhere near 40 minutes, so a flat timeout
+        # here is safe (unlike the rust/LLVM step below).
+        working-directory: termux-packages-src
+        env:
+          CI: 'true'
+        run: |
+          timeout -k 60 40m ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+            --architectures aarch64
+
+      - name: Build the Hermès runtime packages (python, openssl, libffi, rust, libsqlite) and finalize
+        # Second call to build-bootstraps.sh: build-package.sh skips
+        # anything already built in the previous step (it checks for an
+        # existing output/*.deb), so this resumes straight into the
+        # packages added via --add, then re-runs extract_debs and
+        # create_bootstrap_archive to produce the final zip. rust pulls in
+        # LLVM and can legitimately run for well over an hour with real
+        # output the whole time, hence the much larger bound here.
+        working-directory: termux-packages-src
+        env:
+          CI: 'true'
+        run: |
+          timeout -k 60 180m ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+            --architectures aarch64 \
+            --add "$TERMUX_BOOTSTRAP_PACKAGES"
+
+      - name: Locate the bootstrap archive
+        id: bootstrap
+        working-directory: termux-packages-src
+        run: |
+          set -euo pipefail
+          if [ ! -f bootstrap-aarch64.zip ]; then
+            echo "::error::bootstrap-aarch64.zip was not produced by build-bootstraps.sh"
+            exit 1
+          fi
+          echo "path=termux-packages-src/bootstrap-aarch64.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bootstrap as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-android-bootstrap-aarch64
+          path: ${{ steps.bootstrap.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish (or replace) the rolling bootstrap release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: android-bootstrap-latest
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" "${{ steps.bootstrap.outputs.path }}" \
+            -R "$GITHUB_REPOSITORY" \
+            --title "Hermès Android Termux bootstrap (aarch64, Python 3.13)" \
+            --notes "Custom Termux bootstrap for $TERMUX_APP_PACKAGE, built from termux-packages@$TERMUX_PACKAGES_COMMIT (run ${GITHUB_RUN_NUMBER}). Packages: $TERMUX_BOOTSTRAP_PACKAGES (+ their dependencies)."

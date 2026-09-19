@@ -95,7 +95,12 @@ const PairingPage = lazy(() => import("@/pages/PairingPage"));
 const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
 const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
-const ChatPage = lazy(() => import("@/pages/ChatPage"));
+// Android build: no Node.js, so the Node/Ink-backed ChatPage below can never
+// launch (PtyBridge spawns a `node` process that doesn't exist here) — see
+// SimpleChatPage.tsx's header comment for the full rationale. Swapped in
+// place of ChatPage; the latter is left importable, unused, for platforms
+// where Node is actually available.
+const ChatPage = lazy(() => import("@/pages/SimpleChatPage"));
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";

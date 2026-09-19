@@ -2427,6 +2427,9 @@ OPTIONAL_ENV_VARS = {
         "daemon)", "Actual Computer base URL (leave empty for hosted relay)", None, password=False),
     "FIREWORKS_API_KEY": _prov("Fireworks AI API key", "Fireworks AI API key",
         "https://app.fireworks.ai/settings/users/api-keys"),
+    "INFERMATIC_API_KEY": _prov("Infermatic API key", "Infermatic API key",
+        "https://infermatic.ai/", advanced=False),
+    "INFERMATIC_BASE_URL": _base_url("Infermatic"),
     "MINIMAX_API_KEY": _prov("MiniMax API key (international)", "MiniMax API key",
         "https://www.minimax.io/"),
     "MINIMAX_BASE_URL": _base_url("MiniMax"),
@@ -2573,8 +2576,11 @@ OPTIONAL_ENV_VARS = {
         "Picovoice access key for the Porcupine 'Hey Hermes' wake word engine (optional; "
         "openWakeWord is the free default)", "Picovoice access key",
         "https://console.picovoice.ai/"),
-    "GITHUB_TOKEN": _tool("GitHub token for Skills Hub (higher API rate limits, skill publish)",
-        "GitHub Token", "https://github.com/settings/tokens"),
+    "GITHUB_TOKEN": _tool(
+        "GitHub token for Skills Hub (higher API rate limits, skill publish) and for the "
+        "github_repo tool (reading/writing repo files and opening pull requests over the REST "
+        "API, no local git/gh needed)", "GitHub Token", "https://github.com/settings/tokens",
+        tools=["github_repo"]),
     # ── Bundled skills (opt-in) ── category="skill" (not "tool") so the sandbox env blocklist in
     # tools/environments/local.py does NOT rewrite them; skills need them passed through to curl
     # via tools/env_passthrough.py.

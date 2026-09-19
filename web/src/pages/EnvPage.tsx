@@ -59,6 +59,7 @@ const PROVIDER_GROUPS: { prefix: string; name: string; priority: number }[] = [
   { prefix: "ZAI_", name: "GLM / Z.AI", priority: 5 },
   { prefix: "Z_AI_", name: "GLM / Z.AI", priority: 5 },
   { prefix: "HF_", name: "Hugging Face", priority: 6 },
+  { prefix: "INFERMATIC_", name: "Infermatic", priority: 6.5 },
   { prefix: "KIMI_", name: "Kimi / Moonshot", priority: 7 },
   { prefix: "MINIMAX_CN_", name: "MiniMax (China)", priority: 9 },
   { prefix: "MINIMAX_", name: "MiniMax", priority: 8 },

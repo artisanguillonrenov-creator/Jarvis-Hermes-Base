@@ -1,0 +1,139 @@
+name: Android Debug APK
+
+# Builds the Hermès Android app (android/) and republishes the debug APK to
+# a single rolling GitHub release so it can be downloaded straight from a
+# tablet's browser (no PC, no ADB) — see the Android directives doc.
+#
+# The Gradle build itself is the source of truth (matches what a contributor
+# runs locally via ./android/gradlew); this workflow only adds the Android
+# SDK setup, caching, and the release publish step.
+#
+# No android-actions/setup-android or actions/setup-java pin here on
+# purpose: ubuntu-24.04 runners ship JDK 17 preinstalled (JAVA_HOME_17_X64),
+# and the Android SDK command-line tools are fetched directly from Google
+# (dl.google.com) rather than through an unpinned third-party Action —
+# fewer supply-chain surfaces to trust.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ['**']
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-debug-apk.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-debug-apk
+  cancel-in-progress: true
+
+env:
+  ANDROID_CMDLINE_TOOLS_BUILD: '13114758' # cmdline-tools 17.0, from dl.google.com/android/repository
+  ANDROID_COMPILE_SDK: '35'
+  ANDROID_BUILD_TOOLS: '35.0.0'
+
+jobs:
+  build:
+    name: assembleDebug
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Use the runner's preinstalled JDK 17
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+
+      - name: Free disk space
+        # The Android SDK + build outputs are heavy relative to the runner's
+        # default free space; drop preinstalled toolchains this build never uses.
+        run: |
+          sudo rm -rf /usr/local/lib/android/sdk/ndk 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android/sdk/../../../../.rustup 2>/dev/null || true
+          df -h /
+
+      - name: Cache Android SDK
+        id: sdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/android-sdk
+          key: android-sdk-${{ env.ANDROID_CMDLINE_TOOLS_BUILD }}-${{ env.ANDROID_COMPILE_SDK }}-${{ env.ANDROID_BUILD_TOOLS }}
+
+      - name: Install Android SDK command-line tools
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        env:
+          SDK_ROOT: ${{ runner.temp }}/android-sdk
+        run: |
+          set -euo pipefail
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_BUILD}_latest.zip" -o "$RUNNER_TEMP/cmdline-tools.zip"
+          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$SDK_ROOT/cmdline-tools"
+          mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+
+      - name: Accept licenses and install SDK packages
+        env:
+          SDK_ROOT: ${{ runner.temp }}/android-sdk
+        run: |
+          set -euo pipefail
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+          export ANDROID_HOME="$SDK_ROOT"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+          {
+            echo "ANDROID_SDK_ROOT=$SDK_ROOT"
+            echo "ANDROID_HOME=$SDK_ROOT"
+          } >> "$GITHUB_ENV"
+
+      - name: Write local.properties
+        run: echo "sdk.dir=${{ runner.temp }}/android-sdk" > android/local.properties
+
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/**/build.gradle.kts') }}
+          restore-keys: |
+            gradle-
+
+      - name: ./gradlew assembleDebug
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Locate the built APK
+        id: apk
+        run: |
+          apk=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -1)
+          if [ -z "$apk" ]; then
+            echo "::error::no debug APK found under android/app/build/outputs/apk/debug"
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-android-debug
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish (or replace) the rolling debug release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: android-debug-latest
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
+            -R "$GITHUB_REPOSITORY" \
+            --title "Hermès Android (debug)" \
+            --notes "Debug build from commit ${GITHUB_SHA} (run ${GITHUB_RUN_NUMBER}). Download this .apk on the tablet's browser and install it (allow unknown sources for the browser app once, if asked)."
