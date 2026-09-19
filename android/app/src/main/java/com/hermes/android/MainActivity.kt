@@ -6,9 +6,11 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
@@ -52,13 +54,23 @@ class MainActivity : Activity() {
         // at the bottom of the WebView) renders underneath the status bar and the
         // navigation/taskbar rather than being pushed clear of them.
         container.setOnApplyWindowInsetsListener { view, insets ->
-            @Suppress("DEPRECATION")
-            view.setPadding(
-                insets.systemWindowInsetLeft,
-                insets.systemWindowInsetTop,
-                insets.systemWindowInsetRight,
-                insets.systemWindowInsetBottom,
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // tappableElement() covers a persistent tablet taskbar dock (reserved
+                // screen space a Samsung-style taskbar occupies) in addition to the
+                // plain navigation bar; systemBars() alone missed it.
+                val bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.tappableElement(),
+                )
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                view.setPadding(
+                    insets.systemWindowInsetLeft,
+                    insets.systemWindowInsetTop,
+                    insets.systemWindowInsetRight,
+                    insets.systemWindowInsetBottom,
+                )
+            }
             insets
         }
 
