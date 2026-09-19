@@ -21,6 +21,18 @@ matching Chaquopy's own Python 3.12 build):
   and, left enabled, made `pyo3-build-config` still try to link against a
   nonexistent Windows-style stub even when targeting Android.
 
+**Extension filename**: maturin names the built `.so` after the full target
+triple (`_pydantic_core.cpython-312-aarch64-android-android.so`). Chaquopy's
+own Android wheels (checked against its `psutil`/`cryptography` builds) use a
+bare `<name>.so` instead — its CPython 3.12 build's `EXTENSION_SUFFIXES`
+doesn't include the tagged form, so a triple-tagged `.so` is silently
+invisible to the import system (`ImportError: No module named
+'pydantic_core._pydantic_core'`, not a link/symbol error, since the file is
+never even considered a candidate). Both wheels here have the compiled
+extension renamed to the bare form after building (`_pydantic_core.so`,
+`jiter.so`) with the `RECORD` hash/size updated to match — a rebuild after a
+version bump must repeat that rename, not just re-run maturin.
+
 Versions here must stay in sync with `requirements.txt`'s `pydantic==` and
 `openai==` pins (`pydantic-core==2.46.4` matches `pydantic==2.13.4`;
 `jiter==0.17.0` satisfies openai's `jiter<1,>=0.10.0`). Rebuilding after a
