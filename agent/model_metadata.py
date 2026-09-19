@@ -361,6 +361,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     # upstream; Infermatic itself serves it at 32K) — without this, the 256K fallback
     # let the turn loop send a prompt the provider immediately rejected as overflow.
     "euryale": 32000, "kunou": 32000,
+    # Also Infermatic-specific: Qwen3.6-35B-A3B is 262K/1M upstream but served at 66K
+    # there — a general agentic-coding model (unlike the Sao10K roleplay models above),
+    # so a much better fit for tool-use turns despite still needing its own real cap.
+    "qwen3.6-35b-a3b": 66000,
     # MiniMax — M3 is 1M; M2.x is 204,800. https://platform.minimax.io/docs/api-reference/text-chat-openai
     "minimax-m3": 1000000, "minimax": 204800,
     # GLM — 5.2/5.3 are 1M (5.2 verified empirically at 789K on api.z.ai); older GLM ~202K.
