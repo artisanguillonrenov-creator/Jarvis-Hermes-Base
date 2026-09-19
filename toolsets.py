@@ -26,6 +26,7 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     "cronjob_manage",
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    "github_repo",
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_request_review",
     "kanban_request_changes",
@@ -141,6 +142,11 @@ TOOLSETS = {
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "homeassistant": _ts("Home Assistant smart home control and monitoring", _HA_TOOLS),
+    "github": _ts(
+        "Read/write files and open pull requests on a GitHub repo over the REST API — only "
+        "active when GITHUB_TOKEN is configured. Works without a local git/gh binary.",
+        ["github_repo"],
+    ),
     "kanban": _ts(
         "Kanban multi-agent coordination — only active when the agent is spawned by "
         "the kanban dispatcher (HERMES_KANBAN_TASK env set). The dispatcher runs "
