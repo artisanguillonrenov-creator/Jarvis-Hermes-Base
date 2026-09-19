@@ -41,6 +41,16 @@ interface HermesRuntime {
     val diagFile: File
 
     /**
+     * Captured `sys.stdout`/`sys.stderr` from the Python side. hermes_cli's
+     * own error paths often `print()` the actual detail and then
+     * `sys.exit(1)` with a bare exit code — the exception alone (Chaquopy
+     * only bridges that exit code as a `PyException`) loses the message
+     * entirely, so stdout/stderr are redirected here from the very start of
+     * [start] instead of wherever Chaquopy would otherwise send them.
+     */
+    val stdioFile: File
+
+    /**
      * Starts the Hermès dashboard server on a dedicated background thread and
      * returns immediately (it does not itself wait for the server to be
      * listening — the caller polls [port] and [lastError]). Throws only if the
@@ -60,6 +70,7 @@ interface HermesRuntime {
 private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntime {
     override val port: Int = 9119
     override val diagFile: File = context.filesDir.resolve("hermes_diag.log")
+    override val stdioFile: File = context.filesDir.resolve("hermes_stdio.log")
 
     @Volatile
     override var lastError: Throwable? = null
@@ -102,6 +113,14 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                         "--no-open",
                     ),
                 )
+
+                // Line-buffered so a partial log survives a hard crash, not
+                // just a clean exit.
+                stdioFile.delete()
+                val stdio = py.getBuiltins()
+                    .callAttr("open", stdioFile.absolutePath, "w", Kwarg("buffering", 1))
+                sys.put("stdout", stdio)
+                sys.put("stderr", stdio)
 
                 // Belt-and-suspenders for a hang with no exception (e.g. a
                 // blocking call on stdin/network that never returns): dump

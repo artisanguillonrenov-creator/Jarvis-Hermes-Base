@@ -154,11 +154,17 @@ class MainActivity : Activity() {
     private fun showFatalError(t: Throwable) {
         Log.e("MainActivity", "Échec du démarrage du runtime Hermès", t)
         val trace = StringWriter().also { t.printStackTrace(PrintWriter(it)) }.toString()
+        // Exceptions from Chaquopy (PyException wrapping SystemExit, in
+        // particular) can lose the actual message hermes_cli printed before
+        // exiting — that text landed in stdioFile instead (see
+        // HermesRuntime.start), so always show both.
+        val stdio = runtime.stdioFile.takeIf { it.exists() }?.readText()?.trim().orEmpty()
+        val stdioSection = if (stdio.isNotEmpty()) "\n\n--- stdout/stderr Python ---\n$stdio" else ""
         statusView.apply {
             gravity = Gravity.START
             typeface = Typeface.MONOSPACE
             textSize = 11f
-            text = "Échec du démarrage du runtime Hermès :\n\n$trace"
+            text = "Échec du démarrage du runtime Hermès :\n\n$trace$stdioSection"
         }
     }
 
