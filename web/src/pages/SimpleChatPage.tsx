@@ -22,6 +22,7 @@
  *     which must be appended to the prompt text
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import {
   Copy,
   FileText,
@@ -97,6 +98,10 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  // SessionsPage's "resume" action links here as /chat?resume=<id> (same
+  // convention the old PTY-backed ChatPage used) — read once on mount.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const resumeIdRef = useRef(searchParams.get("resume"));
 
   useEffect(() => {
     let cancelled = false;
@@ -141,10 +146,37 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
       setSending(false);
     });
 
+    const resumeId = resumeIdRef.current;
     gw.connect()
-      .then(() => gw.request<{ session_id: string }>("session.create", {}))
+      .then(() =>
+        resumeId
+          ? gw.request<{
+              session_id: string;
+              messages?: { role: string; text?: string }[];
+            }>("session.resume", { session_id: resumeId })
+          : gw
+              .request<{ session_id: string }>("session.create", {})
+              .then((res) => ({ ...res, messages: undefined })),
+      )
       .then((res) => {
-        if (!cancelled) setSessionId(res.session_id);
+        if (cancelled) return;
+        setSessionId(res.session_id);
+        if (res.messages) {
+          setMessages(
+            res.messages
+              .filter(
+                (m): m is { role: "user" | "assistant"; text: string } =>
+                  (m.role === "user" || m.role === "assistant") && !!m.text,
+              )
+              .map((m) => ({
+                id: newId(),
+                role: m.role,
+                text: m.text,
+                images: m.role === "assistant" ? extractImages(m.text) : [],
+                streaming: false,
+              })),
+          );
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -263,6 +295,12 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
   // has no other way to recover short of a fresh session_id — a brand new
   // AIAgent instance, so any per-session error state resets with it.
   const startNewChat = useCallback(() => {
+    resumeIdRef.current = null;
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("resume");
+      return next;
+    });
     setMessages([]);
     setAttachments((prev) => {
       prev.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
@@ -274,7 +312,7 @@ export default function SimpleChatPage({ isActive }: { isActive?: boolean }) {
     gw.request<{ session_id: string }>("session.create", {})
       .then((res) => setSessionId(res.session_id))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [gw]);
+  }, [gw, setSearchParams]);
 
   if (isActive === false) return null;
 
