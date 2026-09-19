@@ -47,6 +47,21 @@ class MainActivity : Activity() {
             )
         }
 
+        // Apps targeting Android 15 (API 35) draw edge-to-edge unconditionally —
+        // without this, content (the status text, and the dashboard's own composer
+        // at the bottom of the WebView) renders underneath the status bar and the
+        // navigation/taskbar rather than being pushed clear of them.
+        container.setOnApplyWindowInsetsListener { view, insets ->
+            @Suppress("DEPRECATION")
+            view.setPadding(
+                insets.systemWindowInsetLeft,
+                insets.systemWindowInsetTop,
+                insets.systemWindowInsetRight,
+                insets.systemWindowInsetBottom,
+            )
+            insets
+        }
+
         statusView = TextView(this).apply {
             gravity = Gravity.CENTER
             setPadding(64, 64, 64, 64)
