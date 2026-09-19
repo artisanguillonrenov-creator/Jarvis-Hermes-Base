@@ -10,12 +10,24 @@ matching Chaquopy's own Python 3.12 build):
   Android NDK's `aarch64-linux-android24-clang` (set in `~/.cargo/config.toml`
   for the `aarch64-linux-android` target).
 - PyO3 cross config: a `PYO3_CONFIG_FILE` describing the target interpreter
-  (CPython 3.12, shared build) plus a `lib_dir` pointing at a stub
-  `libpython3.12.so` (an empty placeholder ELF `.so`, just so the linker can
-  resolve `-lpython3.12` at build time). At runtime on-device, the loader
-  resolves that `NEEDED libpython3.12.so` entry against Chaquopy's own
-  bundled `libpython3.12.so` instead — the same mechanism Chaquopy's own
-  native packages (cryptography, Pillow, psutil, pyyaml) rely on.
+  (CPython 3.12, shared build) plus a `lib_dir` pointing at the **real**
+  `libpython3.12.so` extracted from this app's own built APK
+  (`lib/arm64-v8a/libpython3.12.so`) — NOT an empty stub. An empty stub
+  linked fine (no `-z defs`/`--no-undefined` is passed) but silently broke
+  at runtime: since the stub defines none of the actual CPython C-API
+  symbols pydantic-core/jiter reference, the linker's `--as-needed` flag
+  (present in every `rustc`-generated link line) drops the `NEEDED
+  libpython3.12.so` entry entirely when nothing was actually resolved
+  against it, so the built `.so` ends up with NO dependency on libpython at
+  all — `readelf -d <file> | grep NEEDED` must show `libpython3.12.so`.
+  On-device this surfaced as `dlopen failed: cannot locate symbol
+  "PyTuple_Type"` rather than a link error, since the missing NEEDED entry
+  only matters at load time. Linking against the real extracted library
+  fixes this because real symbols get pulled from it, so `--as-needed` keeps
+  the dependency. At runtime the loader then resolves that same `NEEDED
+  libpython3.12.so` entry against Chaquopy's own bundled copy already
+  loaded in the process — the same mechanism Chaquopy's own native packages
+  (cryptography, Pillow, psutil, pyyaml) rely on.
 - `pydantic-core`: built from the `pyo3` feature set with `generate-import-lib`
   removed — that feature is Windows-only (synthesizes a `.lib` import stub)
   and, left enabled, made `pyo3-build-config` still try to link against a
