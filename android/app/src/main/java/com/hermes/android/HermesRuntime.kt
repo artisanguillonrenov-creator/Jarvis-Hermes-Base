@@ -11,59 +11,30 @@ import java.io.File
 /**
  * Boundary between the Android app and the embedded Hermès (Python) runtime.
  *
- * Backed by Chaquopy: [start] boots a real CPython 3.12 interpreter embedded in
- * the APK and calls straight into `hermes_cli.main.main()` — the same entry
- * point `hermes dashboard` uses from a normal checkout — with `sys.argv` and
- * `HERMES_HOME` set for this app's sandbox. No PC, server, or network
- * dependency: everything (interpreter, hermes-agent's source tree, its
- * third-party dependencies, and the prebuilt dashboard SPA) is bundled in the
- * APK by Chaquopy at build time.
+ * V2 keeps one process-wide runtime instance so Android Service recreation can
+ * never start a second dashboard server on the same port.
  */
 interface HermesRuntime {
-    /** Loopback port `hermes dashboard` will be reachable on once started. */
     val port: Int
-
-    /**
-     * Non-null once the dedicated server thread has died from an uncaught
-     * exception. There's no adb/PC in the loop for this app's target device,
-     * so the only diagnostic channel is putting the real failure on screen —
-     * callers should poll this instead of waiting out a generic timeout.
-     */
     val lastError: Throwable?
-
-    /**
-     * Path to a diagnostic dump that fills in exactly when a hang wouldn't
-     * otherwise raise anything into [lastError] — e.g. a call blocked forever
-     * on I/O. Populated ~25s into the Python-side start attempt regardless of
-     * outcome (see [start]); callers should only read it once they've decided
-     * startup is stuck (no HTTP response, no [lastError]).
-     */
     val diagFile: File
-
-    /**
-     * Captured `sys.stdout`/`sys.stderr` from the Python side. hermes_cli's
-     * own error paths often `print()` the actual detail and then
-     * `sys.exit(1)` with a bare exit code — the exception alone (Chaquopy
-     * only bridges that exit code as a `PyException`) loses the message
-     * entirely, so stdout/stderr are redirected here from the very start of
-     * [start] instead of wherever Chaquopy would otherwise send them.
-     */
     val stdioFile: File
 
-    /**
-     * Starts the Hermès dashboard server on a dedicated background thread and
-     * returns immediately (it does not itself wait for the server to be
-     * listening — the caller polls [port] and [lastError]). Throws only if the
-     * interpreter or the initial dispatch into `hermes_cli.main.main()` cannot
-     * be started at all; runtime failures inside the server surface via
-     * [lastError].
-     */
     fun start(onStatus: (String) -> Unit)
-
     fun stop()
 
     companion object {
-        fun create(context: Context): HermesRuntime = ChaquopyHermesRuntime(context)
+        @Volatile
+        private var instance: HermesRuntime? = null
+
+        fun create(context: Context): HermesRuntime {
+            instance?.let { return it }
+            return synchronized(this) {
+                instance ?: ChaquopyHermesRuntime(context.applicationContext).also {
+                    instance = it
+                }
+            }
+        }
     }
 }
 
@@ -79,17 +50,22 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
     @Volatile
     private var serverThread: Thread? = null
 
+    @Synchronized
     override fun start(onStatus: (String) -> Unit) {
+        val existing = serverThread
+        if (existing?.isAlive == true) {
+            onStatus("Runtime Hermès déjà actif.")
+            return
+        }
+
+        lastError = null
         onStatus("Démarrage du runtime Python…")
 
         val hermesHome = context.filesDir.resolve(".hermes").apply { mkdirs() }.absolutePath
         val appContext = context.applicationContext
 
-        // hermes_cli.main installs signal handlers (SIGTERM hangup protection),
-        // and Python only allows that from the interpreter's "main thread" —
-        // whichever thread first calls Python.start(). So Python.start() and
-        // hermes_cli.main.main() both run on this one dedicated thread, never
-        // the caller's thread or the UI thread.
+        // Python.start() and hermes_cli.main.main() stay on the same dedicated
+        // thread because hermes_cli installs signal handlers during startup.
         val thread = Thread({
             try {
                 if (!Python.isStarted()) {
@@ -101,9 +77,6 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                 val environ = os["environ"]
                 environ!!.callAttr("__setitem__", "HERMES_HOME", hermesHome)
                 environ.callAttr("__setitem__", "HOME", appContext.filesDir.absolutePath)
-                // Covers agent/i18n.py's static strings (approval prompts, gateway
-                // slash-command replies) — the dashboard's own UI locale is a
-                // separate, browser-side default (web/src/i18n/context.tsx).
                 environ.callAttr("__setitem__", "HERMES_LANGUAGE", "fr")
 
                 val sys = py.getModule("sys")
@@ -118,18 +91,15 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                     ),
                 )
 
-                // Line-buffered so a partial log survives a hard crash, not
-                // just a clean exit.
+                // Line-buffered so logs survive hard failures as far as possible.
                 stdioFile.delete()
                 val stdio = py.getBuiltins()
                     .callAttr("open", stdioFile.absolutePath, "w", Kwarg("buffering", 1))
                 sys.put("stdout", stdio)
                 sys.put("stderr", stdio)
 
-                // Belt-and-suspenders for a hang with no exception (e.g. a
-                // blocking call on stdin/network that never returns): dump
-                // every thread's Python stack to a plain file after 25s,
-                // readable from Kotlin with no adb/PC involved.
+                // If startup hangs instead of throwing, keep a Python stack dump
+                // which the Android UI can display without adb or a PC.
                 diagFile.delete()
                 val diagHandle = py.getBuiltins().callAttr("open", diagFile.absolutePath, "w")
                 py.getModule("faulthandler")
@@ -145,17 +115,16 @@ private class ChaquopyHermesRuntime(private val context: Context) : HermesRuntim
                 lastError = t
             }
         }, "hermes-dashboard-server")
+
         thread.isDaemon = true
         serverThread = thread
         thread.start()
     }
 
     override fun stop() {
-        // `hermes dashboard` runs uvicorn's blocking Server.run() with no
-        // in-process handle exposed here to ask it to shut down gracefully;
-        // the daemon thread (and the whole embedded interpreter) is torn down
-        // with the process when the Activity/app dies, which is acceptable
-        // for this single-window app.
+        // Intentionally non-destructive in V2. The embedded dashboard has no
+        // in-process graceful shutdown handle yet. The process owns the runtime;
+        // closing only the Activity or recreating the Service must not kill it.
     }
 
     companion object {
